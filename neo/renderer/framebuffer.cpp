@@ -8,6 +8,7 @@ GPL3
 
 idCVar r_framebufferFilter( "r_framebufferFilter", "0", CVAR_RENDERER | CVAR_BOOL, "Image filter when using the framebuffer. 0 = Nearest, 1 = Linear" );
 idCVar r_framebufferMaintAspect( "r_framebufferMaintAspect", "0", CVAR_RENDERER | CVAR_BOOL, "If rendering to a framebuffer and it's not the same aspect ratio as the window, maintain aspect" );
+idCVar r_framebufferSharpen( "r_framebufferSharpen", "0", CVAR_RENDERER | CVAR_FLOAT | CVAR_ARCHIVE, "Sharpen the upscaled framebuffer (contrast adaptive, like AMD CAS). 0 = off, 0.1 - 1 = strength. Implies linear filtering", 0.0f, 1.0f );
 
 static GLuint m_framebuffer = -1;
 static GLuint m_depthbuffer;
@@ -16,11 +17,21 @@ static GLuint m_stencilbuffer;
 static int m_framebuffer_width, m_framebuffer_height;
 static GLuint m_framebuffer_texture;
 
-static GLuint m_positionLoc;
-static GLuint m_texCoordLoc;
-static GLuint m_samplerLoc;
+// one program for the plain copy, one for the sharpening pass
+typedef struct {
+	GLuint	program;
+	GLint	positionLoc;
+	GLint	texCoordLoc;
+	GLint	samplerLoc;
+	GLint	texelLoc;		// sharpen only: 1 / texture size
+	GLint	maxCoordLoc;	// sharpen only: texture coords of the rendered area
+	GLint	sharpenLoc;		// sharpen only: strength
+} fbProgram_t;
 
-static GLuint r_program;
+static fbProgram_t r_copyProgram;
+static fbProgram_t r_sharpenProgram;
+
+static int m_currentFilter = -1;	// GL filter currently set on the framebuffer texture
 
 static bool m_maintainAspect = false;
 
@@ -108,40 +119,78 @@ int createProgram(const char * vertexSource, const char *  fragmentSource)
 	return program;
 }
 
+static void initProgram( fbProgram_t &p, const char *vertSource, const char *fragSource )
+{
+	p.program = createProgram( vertSource, fragSource );
+
+	glUseProgram( p.program );
+
+	// get attrib locations
+	p.positionLoc = glGetAttribLocation( p.program, "a_position" );
+	p.texCoordLoc = glGetAttribLocation( p.program, "a_texCoord" );
+	p.samplerLoc  = glGetUniformLocation( p.program, "s_texture" );
+	p.texelLoc    = glGetUniformLocation( p.program, "u_texel" );
+	p.maxCoordLoc = glGetUniformLocation( p.program, "u_maxCoord" );
+	p.sharpenLoc  = glGetUniformLocation( p.program, "u_sharpen" );
+
+	glUniform1i( p.samplerLoc, 0 );
+}
+
 static void createShaders (void)
 {
-	const GLchar *vertSource = \
-           "attribute vec4 a_position;                                     \n \
-			attribute vec2 a_texCoord;                                     \n \
-			varying vec2 v_texCoord;                                       \n \
-			void main()                                                    \n \
-			{                                                              \n \
-			   gl_Position = a_position;                                   \n \
-			   v_texCoord = a_texCoord;                                    \n \
-			}                                                              \n \
-			";
+	const GLchar *vertSource =
+		"attribute vec4 a_position;\n"
+		"attribute vec2 a_texCoord;\n"
+		"varying vec2 v_texCoord;\n"
+		"void main()\n"
+		"{\n"
+		"	gl_Position = a_position;\n"
+		"	v_texCoord = a_texCoord;\n"
+		"}\n";
 
-	const GLchar *fragSource = \
-			"precision mediump float;                                \n  \
-			varying vec2 v_texCoord;                                 \n  \
-			uniform sampler2D s_texture;                             \n  \
-			void main()                                              \n  \
-			{                                                        \n  \
-				gl_FragColor =  texture2D( s_texture, v_texCoord );  \n  \
-				//gl_FragColor =  vec4( 0.8, 0.5, 0.9, 1.0 );  \n  \
-			}                                                        \n  \
-			";
+	const GLchar *copySource =
+		"precision mediump float;\n"
+		"varying vec2 v_texCoord;\n"
+		"uniform sampler2D s_texture;\n"
+		"void main()\n"
+		"{\n"
+		"	gl_FragColor = texture2D( s_texture, v_texCoord );\n"
+		"}\n";
 
-	r_program = createProgram(vertSource, fragSource);
+	// Contrast adaptive sharpening (after AMD FidelityFX CAS), 5 taps.
+	// The framebuffer is upscaled with bilinear filtering; the neighbours are
+	// taken one source pixel away. Where the local contrast is already high the
+	// sharpening is reduced, so edges don't get bright/dark halos.
+	// Coordinates are clamped to the rendered area: the texture is padded to a
+	// power of two and the padding holds no image.
+	const GLchar *sharpenSource =
+		"precision mediump float;\n"
+		"varying vec2 v_texCoord;\n"
+		"uniform sampler2D s_texture;\n"
+		"uniform vec2 u_texel;\n"
+		"uniform vec2 u_maxCoord;\n"
+		"uniform float u_sharpen;\n"
+		"vec3 tap( vec2 uv )\n"
+		"{\n"
+		"	return texture2D( s_texture, clamp( uv, u_texel * 0.5, u_maxCoord - u_texel * 0.5 ) ).rgb;\n"
+		"}\n"
+		"void main()\n"
+		"{\n"
+		"	vec3 c = tap( v_texCoord );\n"
+		"	vec3 n = tap( v_texCoord + vec2( 0.0, u_texel.y ) );\n"
+		"	vec3 s = tap( v_texCoord - vec2( 0.0, u_texel.y ) );\n"
+		"	vec3 w = tap( v_texCoord - vec2( u_texel.x, 0.0 ) );\n"
+		"	vec3 e = tap( v_texCoord + vec2( u_texel.x, 0.0 ) );\n"
+		"	vec3 mn = min( c, min( min( n, s ), min( w, e ) ) );\n"
+		"	vec3 mx = max( c, max( max( n, s ), max( w, e ) ) );\n"
+		"	vec3 amp = sqrt( clamp( min( mn, 1.0 - mx ) / max( mx, 0.001 ), 0.0, 1.0 ) );\n"
+		"	vec3 wgt = amp * ( -1.0 / mix( 8.0, 5.0, u_sharpen ) );\n"
+		"	vec3 col = ( c + ( n + s + w + e ) * wgt ) / ( 1.0 + 4.0 * wgt );\n"
+		"	gl_FragColor = vec4( clamp( col, 0.0, 1.0 ), 1.0 );\n"
+		"}\n";
 
-	glUseProgram(r_program);
-
-   // get attrib locations
-	m_positionLoc = glGetAttribLocation(r_program, "a_position");
-	m_texCoordLoc = glGetAttribLocation(r_program, "a_texCoord");
-	m_samplerLoc  = glGetUniformLocation(r_program, "s_texture");
-
-	glUniform1i(m_samplerLoc, 0);
+	initProgram( r_copyProgram, vertSource, copySource );
+	initProgram( r_sharpenProgram, vertSource, sharpenSource );
 }
 
 
@@ -172,18 +221,12 @@ void R_InitFrameBuffer()
 	glGenTextures(1, &m_framebuffer_texture);
 	glBindTexture(GL_TEXTURE_2D, m_framebuffer_texture);
 	GL_TexBindReset(); // bypassed the bind cache
-	
+
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_framebuffer_width, m_framebuffer_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-	if(r_framebufferFilter.GetInteger() == 0)
-	{
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	}
-	else
-	{
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	}
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	// the filter is set in R_FrameBufferEnd, so the cvars work without vid_restart
+	m_currentFilter = -1;
 
 	// Create framebuffer
 	glGenFramebuffers(1, &m_framebuffer);
@@ -266,7 +309,18 @@ void R_FrameBufferEnd()
     vertexCache.UnbindIndex();
     vertexCache.UnbindVertex();
 
-    glUseProgram(r_program);
+    // pick the program and texture filter; sharpening needs bilinear upscaling
+    const float sharpen = r_framebufferSharpen.GetFloat();
+    const fbProgram_t &prog = ( sharpen > 0.0f ) ? r_sharpenProgram : r_copyProgram;
+    const int filter = ( sharpen > 0.0f || r_framebufferFilter.GetBool() ) ? GL_LINEAR : GL_NEAREST;
+    if (filter != m_currentFilter)
+    {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+        m_currentFilter = filter;
+    }
+
+    glUseProgram(prog.program);
 
     float left = -1;
     float right = 1;
@@ -314,21 +368,28 @@ void R_FrameBufferEnd()
         smax, 0.0f  // TexCoord 3
     };
 
-    glVertexAttribPointer(m_positionLoc, 3, GL_FLOAT,
+    glVertexAttribPointer(prog.positionLoc, 3, GL_FLOAT,
                           false,
                           3 * 4,
                           vert);
 
-    glVertexAttribPointer(m_texCoordLoc, 2, GL_FLOAT,
+    glVertexAttribPointer(prog.texCoordLoc, 2, GL_FLOAT,
                           false,
                           2 * 4,
                           texVert);
 
-    glEnableVertexAttribArray(m_positionLoc);
-    glEnableVertexAttribArray(m_texCoordLoc);
+    glEnableVertexAttribArray(prog.positionLoc);
+    glEnableVertexAttribArray(prog.texCoordLoc);
 
     // Set the sampler texture unit to 0
-    glUniform1i(m_samplerLoc, 0);
+    glUniform1i(prog.samplerLoc, 0);
+
+    if (sharpen > 0.0f)
+    {
+        glUniform2f(prog.texelLoc, 1.0f / (float)m_framebuffer_width, 1.0f / (float)m_framebuffer_height);
+        glUniform2f(prog.maxCoordLoc, smax, tmax);
+        glUniform1f(prog.sharpenLoc, sharpen);
+    }
 
     glViewport(0, 0, glConfig.vidWidthReal, glConfig.vidHeightReal);
 
