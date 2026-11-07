@@ -1000,18 +1000,98 @@ void idImage::ImageProgramStringToCompressedFileName( const char *imageProg, cha
 
 /*
 ================
+EtxBorderClass
+
+What the repeat mode does to the cached data: TR_REPEAT and TR_CLAMP leave
+the texels alone and give identical files, the zero clamps write a border.
+================
+*/
+static int EtxBorderClass( int repeat ) {
+	if ( repeat == TR_CLAMP_TO_ZERO ) {
+		return 1;
+	}
+	if ( repeat == TR_CLAMP_TO_ZERO_ALPHA ) {
+		return 2;
+	}
+	return 0;
+}
+
+/*
+================
+EtxVariantMatches
+
+Whether a file with this header holds the data that loading the image with
+this repeat mode and requested depth would produce. Of the depth, only
+"is it a bump map" changes the data (red/alpha swap); the rest only picks
+the downsize limit, which is applied when loading. resultDepth gets the
+depth the image ends up with (image programs like heightmap turn any
+request into a bump map).
+================
+*/
+static bool EtxVariantMatches( const etxHeader_t &h, int repeat, int depthIn, int &resultDepth ) {
+	if ( EtxBorderClass( h.repeat ) != EtxBorderClass( repeat ) ) {
+		return false;
+	}
+	bool resultBump;
+	if ( depthIn == TD_BUMP ) {
+		resultBump = true;
+	} else if ( h.depthIn == depthIn || h.depthIn != TD_BUMP ) {
+		// same request, or the file was made from another non-bump request:
+		// the image program gives the same answer for this one
+		resultBump = ( h.depthOut == TD_BUMP );
+	} else {
+		// made from a bump request, can't tell what this request gives
+		return false;
+	}
+	if ( resultBump != ( h.depthOut == TD_BUMP ) ) {
+		return false;
+	}
+	resultDepth = resultBump ? TD_BUMP : depthIn;
+	return true;
+}
+
+/*
+================
+EtxReadHeader
+================
+*/
+static bool EtxReadHeader( const char *filename, etxHeader_t &header ) {
+	idFile *f = fileSystem->OpenFileRead( filename );
+	if ( f == NULL ) {
+		return false;
+	}
+	const bool ok = f->Read( &header, sizeof( header ) ) == (int)sizeof( header )
+		&& header.magic == ETX_MAGIC && header.version == ETX_VERSION;
+	fileSystem->CloseFile( f );
+	return ok;
+}
+
+/*
+================
 ETCCacheFileName
 
 dds/<image program as path>.etx
+
+Variants: the same image name can be used with settings that give different
+data (see EtxVariantMatches). The plain name belongs to whichever variant
+was cached first; any other variant uses
+dds/<image program as path>~<border><depth>.etx
+Pass variantDepth = -1 for the plain name, or the depth requested for the
+image to get its variant name.
 ================
 */
-bool idImage::ETCCacheFileName( char *fileName ) const {
+bool idImage::ETCCacheFileName( char *fileName, int variantDepth ) const {
 	ImageProgramStringToCompressedFileName( imgName, fileName );
 	char *ext = strrchr( fileName, '.' );
 	if ( ext == NULL ) {
 		return false;
 	}
-	strcpy( ext, ".etx" );	// same length as ".dds"
+	if ( variantDepth < 0 ) {
+		strcpy( ext, ".etx" );	// same length as ".dds"
+	} else {
+		static const char borderNames[3] = { 'n', 'z', 'a' };
+		sprintf( ext, "~%c%d.etx", borderNames[EtxBorderClass( repeat )], variantDepth );
+	}
 	return true;
 }
 
@@ -1148,13 +1228,22 @@ EtxAppendLevel()
 ================
 */
 void idImage::WriteETCCache() const {
-	char filename[MAX_IMAGE_NAME];
+	char filename[MAX_IMAGE_NAME * 2];
 
 	if ( etxLevels != NumLevelsForImageSize( etxTopWidth, etxTopHeight ) ) {
 		return;		// incomplete mip chain, don't cache
 	}
-	if ( !ETCCacheFileName( filename ) ) {
+	if ( !ETCCacheFileName( filename, -1 ) ) {
 		return;
+	}
+	// if another variant of this image already has the plain name, keep it
+	// and use the variant name, so the two don't overwrite each other
+	etxHeader_t existing;
+	int resultDepth;
+	if ( EtxReadHeader( filename, existing ) && !EtxVariantMatches( existing, repeat, etxDepthIn, resultDepth ) ) {
+		if ( !ETCCacheFileName( filename, etxDepthIn ) ) {
+			return;
+		}
 	}
 
 	etxHeader_t header;
@@ -1205,18 +1294,33 @@ and only that level and the smaller ones are read from the file (they are
 at its end). Returns false (and leaves the image untouched) if there is no
 usable cache file, so the caller builds the image from the source as usual
 (which rewrites the file).
+
+The plain file name is tried first, then this variant's name (see
+ETCCacheFileName). With "developer 1" the reason a file is rejected is
+printed to the console.
 ================
 */
 bool idImage::LoadETCCache() {
-	char filename[MAX_IMAGE_NAME];
+	char filename[MAX_IMAGE_NAME * 2];
 
 	if ( !r_useETC1.GetBool() || !r_useETC1Cache.GetBool() || !glConfig.isInitialized ) {
 		return false;
 	}
-	if ( !ETCCacheFileName( filename ) ) {
-		return false;
+	if ( ETCCacheFileName( filename, -1 ) && LoadETCFile( filename ) ) {
+		return true;
 	}
+	if ( ETCCacheFileName( filename, depth ) && LoadETCFile( filename ) ) {
+		return true;
+	}
+	return false;
+}
 
+/*
+================
+LoadETCFile
+================
+*/
+bool idImage::LoadETCFile( const char *filename ) {
 	idFile *f = fileSystem->OpenFileRead( filename );
 	if ( f == NULL ) {
 		return false;
@@ -1225,9 +1329,11 @@ bool idImage::LoadETCCache() {
 	const int len = f->Length();
 	etxHeader_t header;
 	bool valid = false;
+	const char *reason = "bad header";
 	ID_TIME_T sourceTime = 0;
 	int startLevel = -1;
 	int startOffset = 0;
+	int resultDepth = depth;
 
 	if ( len >= (int)sizeof( header ) && f->Read( &header, sizeof( header ) ) == (int)sizeof( header ) ) {
 		valid = header.magic == ETX_MAGIC
@@ -1236,9 +1342,11 @@ bool idImage::LoadETCCache() {
 			&& header.width > 0 && header.height > 0
 			&& header.sourceWidth >= header.width && header.sourceHeight >= header.height
 			&& header.numLevels == NumLevelsForImageSize( header.width, header.height )
-			&& header.depthIn == depth
-			&& header.repeat == repeat
 			&& header.roundDown == globalImages->image_roundDown.GetInteger();
+		if ( valid && !EtxVariantMatches( header, repeat, depth, resultDepth ) ) {
+			valid = false;
+			reason = "other variant (repeat mode / bump map)";
+		}
 	}
 
 	if ( valid ) {
@@ -1246,7 +1354,7 @@ bool idImage::LoadETCCache() {
 		const textureDepth_t savedDepth = depth;
 		int targetWidth = header.sourceWidth;
 		int targetHeight = header.sourceHeight;
-		depth = (textureDepth_t)header.depthOut;
+		depth = (textureDepth_t)resultDepth;
 		GetDownsize( targetWidth, targetHeight );
 		depth = savedDepth;
 
@@ -1267,18 +1375,25 @@ bool idImage::LoadETCCache() {
 		// startLevel < 0: the settings want a bigger size than the cache has
 		// (only if the source or the GPU texture size limit changed)
 		valid = ( startLevel >= 0 && offset == len );
+		if ( !valid ) {
+			reason = ( startLevel < 0 ) ? "needed size not in the file" : "wrong file length";
+		}
 	}
 
 	if ( valid ) {
 		// only the timestamps, the source image isn't loaded
 		R_LoadImageProgram( imgName, NULL, NULL, NULL, &sourceTime, NULL );
 		valid = ( (long long)sourceTime == header.timestamp );
+		if ( !valid ) {
+			reason = "source image changed (timestamp)";
+		}
 	}
 
 	// read the levels we need
 	byte *data = NULL;
 	const int dataSize = len - startOffset;
 	if ( valid ) {
+		reason = NULL;
 		data = (byte *)malloc( dataSize );
 		valid = data != NULL
 			&& f->Seek( startOffset, FS_SEEK_SET ) == 0
@@ -1303,9 +1418,15 @@ bool idImage::LoadETCCache() {
 			w = Max( w >> 1, 1 );
 			h = Max( h >> 1, 1 );
 		}
+		if ( !valid ) {
+			reason = "corrupt level data";
+		}
+	} else if ( reason == NULL ) {
+		reason = "read error";
 	}
 
 	if ( !valid ) {
+		common->DPrintf( "ETC cache: %s not used: %s\n", filename, reason );
 		free( data );
 		return false;
 	}
@@ -1344,7 +1465,7 @@ bool idImage::LoadETCCache() {
 
 	type = TT_2D;
 	internalFormat = GL_RGBA;
-	depth = (textureDepth_t)header.depthOut;
+	depth = (textureDepth_t)resultDepth;
 	timestamp = sourceTime;
 
 	SetImageFilterAndRepeat();
