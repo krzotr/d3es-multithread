@@ -144,6 +144,26 @@ static void SetSDLIcon()
 
 /*
 ===================
+GLimp_ApplyFramebufferSize
+
+d3es: SDL reports the real screen size in glConfig.vidWidth/vidHeight, move it to
+glConfig.vidWidthReal/vidHeightReal and set vidWidth/vidHeight to the size the game
+renders at. If they differ, framebuffer.cpp renders to a framebuffer and upscales it.
+===================
+*/
+static void GLimp_ApplyFramebufferSize() {
+	glConfig.vidWidthReal = glConfig.vidWidth;
+	glConfig.vidHeightReal = glConfig.vidHeight;
+
+	if (r_framebufferWidth.GetInteger() !=0 && r_framebufferHeight.GetInteger() !=0)
+	{
+		glConfig.vidWidth = r_framebufferWidth.GetInteger();
+		glConfig.vidHeight = r_framebufferHeight.GetInteger();
+	}
+}
+
+/*
+===================
 GLimp_Init
 ===================
 */
@@ -478,15 +498,13 @@ try_again:
 		glConfig.isFullscreen = (window->flags & SDL_FULLSCREEN) == SDL_FULLSCREEN;
 #endif
 
-		glConfig.vidWidthReal = glConfig.vidWidth;
-		glConfig.vidHeightReal = glConfig.vidHeight;
+#if !SDL_VERSION_ATLEAST(2, 0, 0)
+		GLimp_ApplyFramebufferSize(); // with SDL2 GLimp_UpdateWindowSize() did this
+#endif
 
 		// If vidWidthReal and vidWidth are different then the framebuffer will automatically be used
-		if (r_framebufferWidth.GetInteger() !=0 && r_framebufferHeight.GetInteger() !=0)
+		if (glConfig.vidWidth != glConfig.vidWidthReal || glConfig.vidHeight != glConfig.vidHeightReal)
 		{
-			glConfig.vidWidth = r_framebufferWidth.GetInteger();
-			glConfig.vidHeight = r_framebufferHeight.GetInteger();
-
 			common->Printf("Rendering in to framebuffer [%d,%d]\n", glConfig.vidWidth, glConfig.vidHeight);
 		}
 
@@ -1003,5 +1021,7 @@ void GLimp_UpdateWindowSize()
 		glConfig.winHeight = wh;
 	}
 	SDL_GL_GetDrawableSize( window, &glConfig.vidWidth, &glConfig.vidHeight );
+	// d3es: keep vidWidth/vidHeight at the framebuffer size, SDL's size is the real one
+	GLimp_ApplyFramebufferSize();
 #endif
 }
