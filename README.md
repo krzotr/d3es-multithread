@@ -132,6 +132,7 @@ Compared to the original _DOOM 3_, the changes of _dhewm 3_ worth mentioning are
 - SDL for low-level OS support, OpenGL and input handling
 - OpenAL for audio output, all OS-specific audio backends are gone
 - OpenAL EFX for EAX reverb effects (read: EAX-like sound effects on all platforms/hardware)
+- Gamepad support
 - Better support for widescreen (and arbitrary display resolutions)
 - A portable build system based on CMake
 - (Cross-)compilation with MinGW-w64
@@ -149,16 +150,17 @@ covered by the original EULA and must be obeyed as usual.
 You must patch the game to the latest version (1.3.1). See the FAQ for details, including
 how to get the game data from Steam on Linux or OSX.
 
-Note that _Doom 3_ and _Doom 3: Resurrection of Evil_ are available from the Steam Store at
+Note that the original _Doom 3_ and _Doom 3: Resurrection of Evil_ (together with
+_DOOM 3: BFG Edition_, which is *not* supported by dhewm3) are available from the Steam Store at
 
-http://store.steampowered.com/app/9050/
-
-http://store.steampowered.com/app/9070/
-
-Note that Steam does not offer the *Resurrection of Evil* addon
-for German customers (or at least people with German IP adresses).
+https://store.steampowered.com/app/208200/DOOM_3/
 
 See https://dhewm3.org/#how-to-install for game data installation instructions.
+
+## Configuration
+
+See [Configuration.md](./Configuration.md) for dhewm3-specific configuration, especially for 
+using gamepads.
 
 ## Compiling
 
