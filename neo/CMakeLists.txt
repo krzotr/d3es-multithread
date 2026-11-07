@@ -59,6 +59,8 @@ option(PI4		"Tune for Raspberry Pi 4 (Cortex-A72): -mcpu, -O3, LTO" OFF)
 set(PGO "" CACHE STRING "Profile-guided optimization: empty (off), GEN (record a profile) or USE (build with the profile)")
 set(PGO_DIR "${CMAKE_BINARY_DIR}/../pgo-profile" CACHE PATH "Where PGO profile data is written/read")
 option(SDL2			"Use SDL2 instead of SDL1.2" ON)
+# ImGui uses the OpenGL2 backend, which doesn't work with the GLES2 renderer
+option(IMGUI		"Build with Dear ImGui integration - requires SDL2 and C++11 (not supported with GLES2)" OFF)
 option(REPRODUCIBLE_BUILD "Replace __DATE__ and __TIME__ by hardcoded values for reproducible builds" OFF)
 
 option(HARDLINK_GAME "Compile gamecode into executable (no game DLLs)" OFF)
@@ -192,9 +194,6 @@ if(CMAKE_MAJOR_VERSION LESS 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_V
 endif()
 
 # libs
-find_package(ZLIB REQUIRED)
-include_directories(${ZLIB_INCLUDE_DIRS})
-
 find_package(OpenAL REQUIRED)
 include_directories(${OPENAL_INCLUDE_DIR})
 
@@ -221,6 +220,20 @@ if(REPRODUCIBLE_BUILD)
 	add_definitions(-DID_REPRODUCIBLE_BUILD)
 endif()
 
+if(IMGUI)
+	if(SDL2)
+		# we need C++11 for ImGui
+		set (CMAKE_CXX_STANDARD 11)
+		message(STATUS "Dear ImGui integration enabled")
+	else()
+		message(WARNING "Disabling IMGUI because SDL1.2 is used - it needs SDL2!")
+		set(IMGUI OFF)
+		add_definitions(-DIMGUI_DISABLE)
+	endif()
+else()
+	message(STATUS "Dear ImGui integration disabled")
+	add_definitions(-DIMGUI_DISABLE)
+endif()
 
 find_package(CURL QUIET)
 if(CURL_FOUND)
@@ -261,6 +274,19 @@ if(NOT WIN32)
 		message(STATUS "Using libbacktrace")
 	else()
 		message(WARNING "libbacktrace wasn't found. It's not required but recommended, because it provides useful backtraces if dhewm3 crashes")
+	endif()
+	
+	# check if our SDL2 supports X11 in SDL_syswm so we can use it for DPI scaling ImGui
+	if(SDL2)
+		set(CMAKE_REQUIRED_LIBRARIES SDL2)
+		check_c_source_compiles( "#include <SDL_syswm.h>
+		int main() { SDL_SysWMinfo wmInfo = {}; wmInfo.info.x11.display = NULL; return 0; }" HAVE_SDL_X11)
+		unset(CMAKE_REQUIRED_LIBRARIES)
+		
+		if(HAVE_SDL_X11)
+			message(STATUS "This SDL2 has X11 support")
+			add_definitions(-DD3_SDL_X11)
+		endif()
 	endif()
 endif() # NOT WIN32
 
@@ -318,12 +344,12 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	set(CMAKE_C_FLAGS_DEBUG "-g -ggdb -D_DEBUG -O0")
 	set(CMAKE_C_FLAGS_DEBUGALL "-g -ggdb -D_DEBUG")
 	set(CMAKE_C_FLAGS_PROFILE "-g -ggdb -D_DEBUG -O1 -fno-omit-frame-pointer")
-	set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-math-errno -fno-trapping-math -fomit-frame-pointer")
+	set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
 	if(PI4)
-		set(CMAKE_C_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -fomit-frame-pointer")
+		set(CMAKE_C_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
 	endif()
-	set(CMAKE_C_FLAGS_RELWITHDEBINFO "-g -ggdb -O2 -fno-math-errno -fno-trapping-math -fno-omit-frame-pointer")
-	set(CMAKE_C_FLAGS_MINSIZEREL "-Os -fno-math-errno -fno-trapping-math -fomit-frame-pointer")
+	set(CMAKE_C_FLAGS_RELWITHDEBINFO "-g -ggdb -O2 -fno-math-errno -fno-trapping-math -ffinite-math-only -fno-omit-frame-pointer")
+	set(CMAKE_C_FLAGS_MINSIZEREL "-Os -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
 
 	set(CMAKE_CXX_FLAGS_DEBUGALL ${CMAKE_C_FLAGS_DEBUGALL})
 	set(CMAKE_CXX_FLAGS_PROFILE ${CMAKE_C_FLAGS_PROFILE})
@@ -361,20 +387,20 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 
 	CHECK_CXX_COMPILER_FLAG("-Woverloaded-virtual" cxx_has_Woverload_virtual)
 	if(cxx_has_Woverload_virtual)
-		add_compile_options(-Woverloaded-virtual)
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Woverloaded-virtual")
 	endif()
 	
 	# shut up about using memcpy() on classes, in the cases doom3 uses it it seems to be fine
 	CHECK_CXX_COMPILER_FLAG("-Wno-class-memaccess" cxx_has_Wno-class-memaccess)
 	if(cxx_has_Wno-class-memaccess)
-		add_compile_options(-Wno-class-memaccess)
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-class-memaccess")
 	endif()
 
 	# ignore warnings about variables named "requires" for now (in C++20 it's a keyword,
 	#  but currently we don't even use C++11 features)
 	CHECK_CXX_COMPILER_FLAG("-Wno-c++20-compat" cxx_has_Wno-cpp20-compat)
 	if(cxx_has_Wno-cpp20-compat)
-		add_compile_options(-Wno-c++20-compat)
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-c++20-compat")
 	endif()
 
 	if(AROS)
@@ -384,11 +410,11 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		add_definitions(-DMACOS_X=1)
 
 		if(cpu STREQUAL "x86_64")
-			add_compile_options(-arch x86_64 -mmacosx-version-min=10.9)
-			set(ldflags "${ldflags} -arch x86_64 -mmacosx-version-min=10.9")
+			add_compile_options(-arch x86_64 -mmacosx-version-min=10.7)
+			set(ldflags "${ldflags} -arch x86_64 -mmacosx-version-min=10.7")
 		elseif(cpu STREQUAL "arm64")
-			add_compile_options(-arch arm64 -mmacosx-version-min=11.0)
-			set(ldflags "${ldflags} -arch arm64 -mmacosx-version-min=11.0")
+			add_compile_options(-arch arm64 -mmacosx-version-min=10.7)
+			set(ldflags "${ldflags} -arch arm64 -mmacosx-version-min=10.7")
 		elseif(cpu STREQUAL "x86")
 			CHECK_CXX_COMPILER_FLAG("-arch i386" cxx_has_arch_i386)
 			if(cxx_has_arch_i386)
@@ -466,6 +492,26 @@ if(WIN32)
 		wsock32
 		ole32
 	)
+endif()
+
+# optimize this source file even in debug builds, to make speed (esp. loading times) more bearable
+# used for libs integrated here like stb_* and miniz(ip)
+if(CMAKE_MAJOR_VERSION LESS 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_VERSION LESS 11 ))
+	function(always_optimize_sourcefile srcfilename)
+		if(MSVC)
+			set_source_files_properties(${srcfilename} PROPERTIES COMPILE_FLAGS "/Ox")
+		else()
+			set_source_files_properties(${srcfilename} PROPERTIES COMPILE_FLAGS "-O2")
+		endif()
+	endfunction()
+else()
+	function(always_optimize_sourcefile srcfilename)
+		if(MSVC)
+			set_source_files_properties(${srcfilename} PROPERTIES COMPILE_OPTIONS "/Ox")
+		else()
+			set_source_files_properties(${srcfilename} PROPERTIES COMPILE_OPTIONS "-O2")
+		endif()
+	endfunction()
 endif()
 
 # fallback for cmake versions without GNUInstallDirs
@@ -561,6 +607,7 @@ set(src_renderer
 	renderer/tr_turboshadow.cpp
 	renderer/framebuffer.cpp
 	renderer/etc_android.cpp
+	renderer/stblib_impls.c
 )
 
 
@@ -585,6 +632,8 @@ set(src_renderer_glsl
     renderer/glsl/zfillShaderFP.cpp
     renderer/glsl/zfillShaderVP.cpp
 )
+
+always_optimize_sourcefile(renderer/stblib_impls.c)
 
 # I'm a bit sloppy with headers and just glob them in..
 # they're only handled in CMake at all so they turn up in Visual Studio solutions..
@@ -612,6 +661,7 @@ set(src_framework
 	framework/DeclPDA.cpp
 	framework/DeclSkin.cpp
 	framework/DeclTable.cpp
+	framework/Dhewm3SettingsMenu.cpp
 	framework/EditField.cpp
 	framework/EventLoop.cpp
 	framework/File.cpp
@@ -626,9 +676,14 @@ set(src_framework
 	framework/async/MsgChannel.cpp
 	framework/async/NetworkSystem.cpp
 	framework/async/ServerScan.cpp
+	framework/miniz/miniz.c
 	framework/minizip/ioapi.c
 	framework/minizip/unzip.cpp
 )
+
+always_optimize_sourcefile(framework/miniz/miniz.c)
+always_optimize_sourcefile(framework/minizip/ioapi.c)
+always_optimize_sourcefile(framework/minizip/unzip.cpp)
 
 add_globbed_headers(src_framework "framework")
 
@@ -706,7 +761,11 @@ set(src_snd
 	sound/snd_system.cpp
 	sound/snd_wavefile.cpp
 	sound/snd_world.cpp
+
+	sound/stbvorbis_impl.c
 )
+
+always_optimize_sourcefile(sound/stbvorbis_impl.c)
 
 add_globbed_headers(src_snd "sound")
 
@@ -786,6 +845,28 @@ set(src_idlib
 )
 
 add_globbed_headers(src_idlib "idlib")
+
+if(IMGUI)
+set(src_imgui
+	libs/imgui/backends/imgui_impl_sdl2.cpp
+	libs/imgui/backends/imgui_impl_opengl2.cpp
+	
+	libs/imgui/imgui.h
+	libs/imgui/imgui.cpp
+	libs/imgui/imgui_draw.cpp
+	libs/imgui/imgui_tables.cpp
+	libs/imgui/imgui_widgets.cpp
+	
+	libs/imgui/imgui_demo.cpp
+	
+	sys/sys_imgui.h
+	sys/sys_imgui.cpp
+	sys/imgui_savestyle.cpp
+)
+else()
+set(src_imgui sys/sys_imgui.h)
+endif()
+
 
 set(src_game
 	game/AF.cpp
@@ -1195,6 +1276,7 @@ if(CORE)
 		${src_core}
 		${src_sys_base}
 		${src_sys_core}
+		${src_imgui}
 		${src_editor_tools}
 	)
 	
@@ -1203,7 +1285,9 @@ if(CORE)
 		set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${DHEWM3BINARY})
 	endif()
 
-	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_sys_core} ${src_editor_tools})
+	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_sys_core} ${src_imgui} ${src_editor_tools})
+
+	target_include_directories(${DHEWM3BINARY} PRIVATE "${CMAKE_SOURCE_DIR}/libs/imgui")
 
 if(HARDLINK_GAME)
 	set_target_properties(${DHEWM3BINARY} PROPERTIES COMPILE_DEFINITIONS "${TOOLS_DEFINES}")
@@ -1218,7 +1302,6 @@ endif()
 		idlib
 		${OPENAL_LIBRARY}
 		${CURL_LIBRARY}
-		${ZLIB_LIBRARY}
 		${SDLx_LIBRARY}
 		${sys_libs}
 		"GLESv2"
@@ -1245,16 +1328,15 @@ if(DEDICATED)
 	source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} PREFIX neo FILES ${src_core} ${src_sys_base} ${src_stub_openal} ${src_stub_gl} ${src_debuggerServer})
 
 if(HARDLINK_GAME)
-	set_target_properties(${DHEWM3BINARY}ded PROPERTIES COMPILE_DEFINITIONS "ID_DEDICATED")
+	set_target_properties(${DHEWM3BINARY}ded PROPERTIES COMPILE_DEFINITIONS "IMGUI_DISABLE;ID_DEDICATED")
 	target_include_directories(${DHEWM3BINARY}ded PRIVATE ${game_includes})
 else()
-	set_target_properties(${DHEWM3BINARY}ded PROPERTIES COMPILE_DEFINITIONS "ID_DEDICATED;__DOOM_DLL__")
+	set_target_properties(${DHEWM3BINARY}ded PROPERTIES COMPILE_DEFINITIONS "IMGUI_DISABLE;ID_DEDICATED;__DOOM_DLL__")
 endif()
 	set_target_properties(${DHEWM3BINARY}ded PROPERTIES LINK_FLAGS "${ldflags}")
 	target_link_libraries(${DHEWM3BINARY}ded
 		idlib
 		${CURL_LIBRARY}
-		${ZLIB_LIBRARY}
 		${SDLx_LIBRARY}
 		${sys_libs}
 	)
