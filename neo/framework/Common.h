@@ -60,7 +60,6 @@ typedef enum {
 
 extern idCVar		com_version;
 extern idCVar		com_skipRenderer;
-extern idCVar		com_asyncInput;
 extern idCVar		com_asyncSound;
 extern idCVar		com_machineSpec;
 extern idCVar		com_purgeAll;
@@ -143,8 +142,8 @@ public:
 								// Called repeatedly by blocking function calls with GUI interactivity.
 	virtual void				GUIFrame( bool execCmd, bool network ) = 0;
 
-								// Called 60 times a second from a background thread for sound mixing,
-								// and input generation. Not called until idCommon::Init() has completed.
+								// Called 60 times a second from a background thread for sound mixing.
+								// Not called until idCommon::Init() has completed.
 	virtual void				Async( void ) = 0;
 
 								// Checks for and removes command line "+set var arg" constructs.
@@ -273,7 +272,7 @@ public:
 		// it returns true if we're currently running the doom3 demo
 		// not relevant for mods, only for game/ aka base.dll/base.so/...
 		FT_IsDemo = 1,
-		// the function's signature is bool fn(idInterpreter,idProgram,int) with arguments:
+		// the function's signature is bool fn(idInterpreter*, idProgram*, int) with arguments:
 		// idInterpreter *interpreter, idProgram *program, int instructionPointer
 		// it returns true if the game debugger is active.
 		// relevant for mods.

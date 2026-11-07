@@ -46,12 +46,13 @@ set(DHEWM3BINARY "dhewm3")
 
 include(CheckCXXCompilerFlag)
 include(GNUInstallDirs OPTIONAL RESULT_VARIABLE GNUINSTALLDIRS)
+include(TestBigEndian)
 
 option(CORE			"Build the core" ON)
 option(BASE			"Build the base game code" ON)
 option(D3XP			"Build the d3xp game code" ON)
 if(MSVC)
-	option(TOOLS		"Build the tools game code (Visual Studio+SDL2 only)" OFF)
+	option(TOOLS		"Build the tools game code (Visual Studio+SDL2/SDL3 only)" OFF)
 endif()
 option(DEDICATED	"Build the dedicated server" OFF)
 option(ONATIVE		"Optimize for the host CPU" OFF)
@@ -62,6 +63,8 @@ option(SDL2			"Use SDL2 instead of SDL1.2" ON)
 # ImGui uses the OpenGL2 backend, which doesn't work with the GLES2 renderer
 option(IMGUI		"Build with Dear ImGui integration - requires SDL2 and C++11 (not supported with GLES2)" OFF)
 option(REPRODUCIBLE_BUILD "Replace __DATE__ and __TIME__ by hardcoded values for reproducible builds" OFF)
+
+option(TRACY		"Build and integrate the Tracy profiler, requires HARDLINK_GAME" OFF)
 
 option(HARDLINK_GAME "Compile gamecode into executable (no game DLLs)" OFF)
 
@@ -197,7 +200,21 @@ endif()
 find_package(OpenAL REQUIRED)
 include_directories(${OPENAL_INCLUDE_DIR})
 
-if (SDL2)
+if (SDL3)
+	# glimp.cpp only sets up the GLES2 context for SDL2
+	message(FATAL_ERROR "SDL3 is not supported with the GLES2 renderer, use SDL2")
+	if(SDL2)
+		message(WARNING "You enabled both SDL2 and SDL3. Only one can be used at a time, disabling SDL2")
+		set(SDL2 OFF CACHE BOOL "Use SDL2 (make sure SDL3 is disabled!)" FORCE)
+	endif()
+	# 1. Look for a SDL3 package,
+	# 2. look for the SDL3-shared component, and
+	# 3. fail if the shared component cannot be found.
+	find_package(SDL3 REQUIRED CONFIG REQUIRED COMPONENTS SDL3-shared)
+	# TODO: include dirs?
+	set(SDLx_LIBRARY SDL3::SDL3)
+	add_definitions(-DD3_SDL3=1)
+elseif (SDL2)
 	# skip SDL2main
 	if(APPLE OR WIN32)
 		set(SDL2_BUILDING_LIBRARY TRUE)
@@ -221,18 +238,29 @@ if(REPRODUCIBLE_BUILD)
 endif()
 
 if(IMGUI)
-	if(SDL2)
+	if(SDL2 OR SDL3)
 		# we need C++11 for ImGui
 		set (CMAKE_CXX_STANDARD 11)
 		message(STATUS "Dear ImGui integration enabled")
+		if(AROS)
+			add_definitions(-DIMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+		endif()
 	else()
-		message(WARNING "Disabling IMGUI because SDL1.2 is used - it needs SDL2!")
+		message(WARNING "Disabling IMGUI because SDL1.2 is used - it needs SDL2 or SDL3!")
 		set(IMGUI OFF)
 		add_definitions(-DIMGUI_DISABLE)
 	endif()
 else()
 	message(STATUS "Dear ImGui integration disabled")
 	add_definitions(-DIMGUI_DISABLE)
+endif()
+
+# without ImGui dhewm3 forces C++98 here; we keep the compiler's default standard
+# instead, the GLES2/multithreading code has always been built with it
+
+if(DEFINED ENV{MSYSTEM})
+	message(STATUS "Detected MSYS or similar environment. Using alternate curl path")
+	set(CURL_NO_CURL_CMAKE ON)
 endif()
 
 find_package(CURL QUIET)
@@ -245,6 +273,41 @@ else()
 	set(ID_ENABLE_CURL OFF)
 	set(CURL_LIBRARY "")
 endif()
+
+if(TRACY)
+	if(CMAKE_MAJOR_VERSION LESS 3 OR ( CMAKE_MAJOR_VERSION EQUAL 3 AND CMAKE_MINOR_VERSION LESS 11 ))
+		message(WARNING "To build with support for Tracy, CMake 3.11 or newer is required (for the FetchContent module)!")
+		unset(TRACY)
+	else()
+		add_definitions(-DTRACY_ENABLE=1)
+		# on demand has some overhead per sample, but when it's disabled and dhewm3 is started
+		# without the viewer it'll cache all the measurement data until the viewer connects
+		# which will eat lots of RAM (growing the longer the game runs)
+		add_definitions(-DTRACY_ON_DEMAND=1)
+		option(TRACY_ENABLE "" ON)
+		include(FetchContent)
+		FetchContent_Declare(
+			tracy
+			GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+			GIT_TAG v0.12.2
+			#GIT_TAG master
+			GIT_SHALLOW TRUE
+			GIT_PROGRESS TRUE
+		)
+		FetchContent_MakeAvailable(tracy)
+
+		# make sure tracy/Tracy.hpp can be included everywhere, not just in dhewm3(ded) source
+		FetchContent_GetProperties(tracy SOURCE_DIR tracy_src)
+		include_directories("${tracy_src}/public")
+
+		# link it into the executables
+		set(sys_libs ${sys_libs} TracyClient)
+
+		# to get calltraces for every sampled "zone" (expensive!)
+		#add_definitions(-DTRACY_CALLSTACK=10)
+	endif()
+endif()
+
 
 set(D3_COMPILER_IS_CLANG FALSE)
 set(D3_COMPILER_IS_GCC_OR_CLANG FALSE)
@@ -275,19 +338,6 @@ if(NOT WIN32)
 	else()
 		message(WARNING "libbacktrace wasn't found. It's not required but recommended, because it provides useful backtraces if dhewm3 crashes")
 	endif()
-	
-	# check if our SDL2 supports X11 in SDL_syswm so we can use it for DPI scaling ImGui
-	if(SDL2)
-		set(CMAKE_REQUIRED_LIBRARIES SDL2)
-		check_c_source_compiles( "#include <SDL_syswm.h>
-		int main() { SDL_SysWMinfo wmInfo = {}; wmInfo.info.x11.display = NULL; return 0; }" HAVE_SDL_X11)
-		unset(CMAKE_REQUIRED_LIBRARIES)
-		
-		if(HAVE_SDL_X11)
-			message(STATUS "This SDL2 has X11 support")
-			add_definitions(-DD3_SDL_X11)
-		endif()
-	endif()
 endif() # NOT WIN32
 
 # check if this is some kind of clang (Clang, AppleClang, whatever)
@@ -303,6 +353,15 @@ endif()
 unset(compiler_id_lower)
 
 endif() # not MSVC
+
+TEST_BIG_ENDIAN(is_big_endian)
+if(is_big_endian)
+	message(STATUS "Detected Big Endian architecture, setting -DD3_IS_BIG_ENDIAN=1")
+	add_definitions(-DD3_IS_BIG_ENDIAN=1)
+else()
+	message(STATUS "Detected Little Endian architecture, setting -DD3_IS_BIG_ENDIAN=0")
+	add_definitions(-DD3_IS_BIG_ENDIAN=0)
+endif()
 
 # compiler specific flags
 if(D3_COMPILER_IS_GCC_OR_CLANG)
@@ -341,27 +400,45 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		endif ()
 	endif ()
 
+	if(PI4)
+		set(OPT_LEVEL "-O3")
+	elseif(cpu STREQUAL "e2k" AND CMAKE_COMPILER_IS_GNUCC)
+		# O3 on E2K mcst-lcc approximately equal to O2 at X86/ARM gcc
+		set(OPT_LEVEL "-O3")
+	else()
+		set(OPT_LEVEL "-O2")
+	endif()
+
 	set(CMAKE_C_FLAGS_DEBUG "-g -ggdb -D_DEBUG -O0")
 	set(CMAKE_C_FLAGS_DEBUGALL "-g -ggdb -D_DEBUG")
 	set(CMAKE_C_FLAGS_PROFILE "-g -ggdb -D_DEBUG -O1 -fno-omit-frame-pointer")
-	set(CMAKE_C_FLAGS_RELEASE "-O2 -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
-	if(PI4)
-		set(CMAKE_C_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
-	endif()
-	set(CMAKE_C_FLAGS_RELWITHDEBINFO "-g -ggdb -O2 -fno-math-errno -fno-trapping-math -ffinite-math-only -fno-omit-frame-pointer")
-	set(CMAKE_C_FLAGS_MINSIZEREL "-Os -fno-math-errno -fno-trapping-math -ffinite-math-only -fomit-frame-pointer")
+	set(CMAKE_C_FLAGS_RELEASE "${OPT_LEVEL} -fomit-frame-pointer")
+	set(CMAKE_C_FLAGS_RELWITHDEBINFO "-g -ggdb ${OPT_LEVEL} -fno-omit-frame-pointer")
+	set(CMAKE_C_FLAGS_MINSIZEREL "-Os -fomit-frame-pointer")
 
 	set(CMAKE_CXX_FLAGS_DEBUGALL ${CMAKE_C_FLAGS_DEBUGALL})
 	set(CMAKE_CXX_FLAGS_PROFILE ${CMAKE_C_FLAGS_PROFILE})
 
+	# these options (together with -ffinite-math-only) should make compilers use direct
+	# CPU instructions (if available) instead of libm calls for many math operations
+	add_compile_options(-fno-math-errno -fno-trapping-math)
+	if( (NOT cpu STREQUAL "arm64") OR APPLE OR WIN32 )
+		# RPi5 on Linux has a weird bug with -ffinite-math-only (#749)
+		# so only enable it for other CPU architectures or Apple or Windows ARM64 devices,
+		# that most probably use different CPUs that hopefully don't have this bug
+		add_compile_options(-ffinite-math-only)
+	endif()
+
+	# Doom3 code wouldn't work with strict aliasing optimizations
 	add_compile_options(-fno-strict-aliasing)
+
 	# dear idiot compilers, don't fuck up math code with useless FMA "optimizations"
 	# (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=100839)
 	CHECK_CXX_COMPILER_FLAG("-ffp-contract=off" cxx_has_fp-contract)
 	if(cxx_has_fp-contract)
 		add_compile_options(-ffp-contract=off)
 	endif()
-	
+
 	if(ASAN)
 		# if this doesn't work, ASan might not be available on your platform, don't set ASAN then..
 		add_compile_options(-fsanitize=address)
@@ -373,7 +450,7 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 		set(sys_libs ${sys_libs} -fsanitize=undefined)
 	endif()
 
-	if(NOT AROS)
+	if(NOT AROS AND NOT WIN32)
 		CHECK_CXX_COMPILER_FLAG("-fvisibility=hidden" cxx_has_fvisibility)
 		if(NOT cxx_has_fvisibility)
 			message(FATAL_ERROR "Compiler does not support -fvisibility")
@@ -384,6 +461,11 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	# TODO fix these warnings
 	add_compile_options(-Wno-sign-compare)
 	add_compile_options(-Wno-switch)
+
+	CHECK_CXX_COMPILER_FLAG("-Wdangling-reference" cxx_has_Wdangling_reference)
+	if(cxx_has_Wdangling_reference)
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror=dangling-reference")
+	endif()
 
 	CHECK_CXX_COMPILER_FLAG("-Woverloaded-virtual" cxx_has_Woverload_virtual)
 	if(cxx_has_Woverload_virtual)
@@ -397,7 +479,7 @@ if(D3_COMPILER_IS_GCC_OR_CLANG)
 	endif()
 
 	# ignore warnings about variables named "requires" for now (in C++20 it's a keyword,
-	#  but currently we don't even use C++11 features)
+	#  but currently we barely use C++11 features)
 	CHECK_CXX_COMPILER_FLAG("-Wno-c++20-compat" cxx_has_Wno-cpp20-compat)
 	if(cxx_has_Wno-cpp20-compat)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-c++20-compat")
@@ -847,8 +929,14 @@ set(src_idlib
 add_globbed_headers(src_idlib "idlib")
 
 if(IMGUI)
-set(src_imgui
-	libs/imgui/backends/imgui_impl_sdl2.cpp
+
+	if(SDL3)
+		set(src_imgui libs/imgui/backends/imgui_impl_sdl3.cpp)
+	else()
+		set(src_imgui libs/imgui/backends/imgui_impl_sdl2.cpp)
+	endif()
+
+set(src_imgui ${src_imgui}
 	libs/imgui/backends/imgui_impl_opengl2.cpp
 	
 	libs/imgui/imgui.h
@@ -1141,13 +1229,7 @@ endif()
 
 if(AROS)
 	set(DHEWM3BINARY "ADoom3")
-	set(sys_libs ${sys_libs} dll)
-
-	set(src_arosdll
-		sys/aros/dll/dllstartup.c
-		sys/aros/dll/dll.c
-		sys/aros/dll/dllimport.c
-	)
+	set(sys_libs ${sys_libs} dynmod)
 
 	set(src_sys_base
 		sys/cpu.cpp
@@ -1157,6 +1239,8 @@ if(AROS)
 		sys/aros/aros_net.cpp
 		sys/aros/aros_signal.cpp
 		sys/aros/aros_main.cpp
+		 sys/aros/aros_dynmodcommon.cpp
+		sys/aros/aros_support.cpp
 		sys/aros/aros_dos.cpp
 	)
 
@@ -1199,8 +1283,12 @@ elseif(WIN32)
 		sys/win32/win_net.cpp
 		sys/win32/win_shared.cpp
 		sys/win32/win_syscon.cpp
-		sys/win32/SDL_win32_main.c
 	)
+
+	if(NOT SDL2 AND NOT SDL3)
+		# only SDL1.2 still uses SDL_win32_main.c
+		set(src_sys_base ${src_sys_base} sys/win32/SDL_win32_main.c)
+	endif()
 
 	# adding the few relevant headers in sys/ manually..
 	set(src_sys_base ${src_sys_base}
@@ -1242,11 +1330,13 @@ include_directories(${CMAKE_BINARY_DIR})
 include_directories(${CMAKE_SOURCE_DIR})
 
 add_library(idlib STATIC ${src_idlib})
+if(SDL3)
+	target_link_libraries(idlib SDL3::Headers) # so it can use SDL_Endian.h
+endif()
 if (AROS)
-	add_library(dll STATIC ${src_arosdll})
-        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "i386")
+	if(CMAKE_SYSTEM_PROCESSOR STREQUAL "i386")
 		set(AROS_ARCH "x86")
-        else()
+	else()
 		set(AROS_ARCH ${CMAKE_SYSTEM_PROCESSOR})
 	endif()
 else()
@@ -1352,7 +1442,8 @@ endif()
 
 if(BASE AND NOT HARDLINK_GAME)
 	if (AROS)
-		add_executable(base sys/aros/dll/dllglue.c ${src_game})
+		add_executable(base ${src_game} sys/aros/aros_dynmodule.cpp sys/aros/aros_dynmodcommon.cpp)
+		target_link_libraries(base idlib dynmodglue)
 		set_target_properties(base PROPERTIES OUTPUT_NAME "base.aros-${AROS_ARCH}")
 	else()
 		add_library(base SHARED ${src_game})
@@ -1366,7 +1457,7 @@ if(BASE AND NOT HARDLINK_GAME)
 	set_target_properties(base PROPERTIES LINK_FLAGS "${ldflags}")
 	set_target_properties(base PROPERTIES INSTALL_NAME_DIR "@executable_path")
 	if (AROS)
-		target_link_libraries(base idlib dll)
+		target_link_libraries(base idlib dynmod)
 	else()
 		target_link_libraries(base idlib)
 	endif()
@@ -1382,7 +1473,8 @@ endif()
 
 if(D3XP AND NOT HARDLINK_GAME)
 	if (AROS)
-		add_executable(d3xp sys/aros/dll/dllglue.c ${src_d3xp})
+		add_executable(d3xp ${src_d3xp} sys/aros/aros_dynmodule.cpp sys/aros/aros_dynmodcommon.cpp)
+		target_link_libraries(d3xp dynmodglue)
 		set_target_properties(d3xp PROPERTIES OUTPUT_NAME "d3xp.aros-${AROS_ARCH}")
 	else()
 		add_library(d3xp SHARED ${src_d3xp})
@@ -1394,7 +1486,7 @@ if(D3XP AND NOT HARDLINK_GAME)
 	set_target_properties(d3xp PROPERTIES LINK_FLAGS "${ldflags}")
 	set_target_properties(d3xp PROPERTIES INSTALL_NAME_DIR "@executable_path")
 	if (AROS)
-		target_link_libraries(d3xp idlib dll)
+		target_link_libraries(d3xp idlib dynmod)
 	else()
 		target_link_libraries(d3xp idlib)
 	endif()

@@ -482,8 +482,13 @@ void idSessionLocal::HandleRestartMenuCommands( const char *menuCommand ) {
 		}
 
 		if ( !idStr::Icmp( cmd, "restart" ) ) {
-			if ( !LoadGame( GetAutoSaveName( mapSpawnData.serverInfo.GetString("si_map") ) ) ) {
-				// If we can't load the autosave then just restart the map
+			// DG: I adjusted the autosave (file) name when writing it in MoveToNewMap()
+			//     so here it must be created in the same way
+			idStr saveName = "Autosave_";
+			saveName += mapSpawnData.serverInfo.GetString("si_map");
+			if ( com_disableAutoSaves.GetBool() // DG: support com_disableAutoSaves
+				|| !LoadGame( saveName ) ) {
+				// If we can't load the autosave (or they're disabled) then just restart the map
 				MoveToNewMap( mapSpawnData.serverInfo.GetString("si_map") );
 			}
 			continue;
@@ -560,6 +565,7 @@ static void loadMod ( const idStr& modName ) {
 	static const char* d3xpMods[] = {
 		// TODO: if there are more mods that need d3xp as base
 		// (and that are supported by dhewm3), add them here
+		"bloodmod_roe",
 		"d3le", // The Lost Mission
 		"librecoopd3xp",
 		"perfected_roe",
@@ -1209,6 +1215,8 @@ idSessionLocal::GuiFrameEvents
 =================
 */
 void idSessionLocal::GuiFrameEvents() {
+	D3P_ScopedCPUSample(Session_GuiFrameEvents);
+
 	const char	*cmd;
 	sysEvent_t  ev;
 	idUserInterface	*gui;

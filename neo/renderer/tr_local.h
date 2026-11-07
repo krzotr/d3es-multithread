@@ -339,6 +339,7 @@ typedef struct viewLight_s {
 	const idMaterial *		lightShader;				// light shader used by backend
 	const float	*			shaderRegisters;			// shader registers used by backend
 	idImage *				falloffImage;				// falloff image used by backend
+	bool					noSpecular;					// lightDef->parms.noSpecular, copied for the backend thread
 
 	const struct drawSurf_s	*globalShadows;				// shadow everything
 	const struct drawSurf_s	*localInteractions;			// don't get local shadows
@@ -830,6 +831,10 @@ public:
 	//     so they can be reset in EndFrame() (Editors tend to mess up the viewport by using BeginFrame())
 	int						origWidth;
 	int						origHeight;
+
+	// DG: taken from the current map's worldspawn ("allow_nospecular")
+	//     true if (unlike in Vanilla Doom3) the "nospecular" parm of a light should be respected
+	bool					allowNoSpecular;
 };
 
 extern backEndState_t		backEnd;
@@ -916,6 +921,8 @@ extern idCVar r_useVertexBuffers;		// if 0, don't use ARB_vertex_buffer_object f
 extern idCVar r_useIndexBuffers;		// if 0, don't use ARB_vertex_buffer_object for indexes
 extern idCVar r_useEntityCallbacks;		// if 0, issue the callback immediately at update time, rather than defering
 extern idCVar r_lightAllBackFaces;		// light all the back faces, even when they would be shadowed
+
+extern idCVar r_supportNoSpecular;		// support nospecular parm of lights
 
 extern idCVar r_skipPostProcess;		// skip all post-process renderings
 extern idCVar r_skipSuppress;			// ignore the per-view suppressions
@@ -1095,7 +1102,7 @@ typedef struct {
 	bool		fullScreen;
 	bool		fullScreenDesktop;
 	bool		stereo;
-	int			displayHz;
+	int			displayHz; // TODO: SDL3 uses float
 	int			multiSamples;
 } glimpParms_t;
 
@@ -1141,14 +1148,17 @@ void		GLimp_DeactivateContext( void );
 const int GRAB_GRABMOUSE	= (1 << 0);
 const int GRAB_HIDECURSOR	= (1 << 1);
 const int GRAB_RELATIVEMOUSE = (1 << 2);
+const int GRAB_ENABLETEXTINPUT = (1 << 3); // to explicitly enable/disable textinput in SDL2/3
 
 void GLimp_GrabInput(int flags);
 
 bool GLimp_SetSwapInterval( int swapInterval );
+int GLimp_GetSwapInterval();
 bool GLimp_SetWindowResizable( bool enableResizable );
 void GLimp_UpdateWindowSize();
 
 glimpParms_t GLimp_GetCurState();
+float GLimp_GetDisplayRefresh();
 
 /*
 ====================================================================
@@ -1428,6 +1438,8 @@ void				R_ResizeStaticTriSurfShadowVerts( srfTriangles_t *tri, int numVerts );
 void				R_ReferenceStaticTriSurfVerts( srfTriangles_t *tri, const srfTriangles_t *reference );
 void				R_ReferenceStaticTriSurfIndexes( srfTriangles_t *tri, const srfTriangles_t *reference );
 void				R_FreeStaticTriSurfSilIndexes( srfTriangles_t *tri );
+void				R_FreeStaticTriSurfSilEdges( srfTriangles_t *tri );
+void				R_FreeStaticTriSurfIndexes( srfTriangles_t *tri );
 void				R_FreeStaticTriSurf( srfTriangles_t *tri );
 void				R_FreeStaticTriSurfVertexCaches( srfTriangles_t *tri );
 void				R_ReallyFreeStaticTriSurf( srfTriangles_t *tri );
@@ -1437,6 +1449,7 @@ int					R_TriSurfMemory( const srfTriangles_t *tri );
 void				R_BoundTriSurf( srfTriangles_t *tri );
 void				R_RemoveDuplicatedTriangles( srfTriangles_t *tri );
 void				R_CreateSilIndexes( srfTriangles_t *tri );
+void				R_IdentifySilEdges( srfTriangles_t *tri, bool omitCoplanarEdges );
 void				R_RemoveDegenerateTriangles( srfTriangles_t *tri );
 void				R_RemoveUnusedVerts( srfTriangles_t *tri );
 void				R_RangeCheckIndexes( const srfTriangles_t *tri );

@@ -160,11 +160,14 @@ bool R_CreateVertexProgramShadowCache(srfTriangles_t* tri) {
 	// If there is no shadow cache, let's compute it
 	else if ( !tri->shadowCache ) {
 		// Build the temporary precomputed shadow vertices
-		shadowCache_t* temp = (shadowCache_t*) _alloca16(tri->numVerts * 2 * sizeof(shadowCache_t));
+		// DG: use Mem_MallocA() instead of _alloca16() to avoid stack overflows with big models
+		bool tempOnStack;
+		shadowCache_t* temp = (shadowCache_t*) Mem_MallocA(tri->numVerts * 2 * sizeof(shadowCache_t), tempOnStack);
 		SIMDProcessor->CreateVertexProgramShadowCache(&temp->xyz, tri->verts, tri->numVerts);
 
 		// Build the shadow cache
 		vertexCache.Alloc(temp, tri->numVerts * 2 * sizeof(shadowCache_t), &tri->shadowCache, false);
+		Mem_FreeA(temp, tempOnStack);
 
 		// Check for errors
 		if ( !tri->shadowCache ) {
@@ -374,6 +377,7 @@ viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *light ) {
 	vLight->fogPlane = light->frustum[5];
 	vLight->frustumTris = light->frustumTris;
 	vLight->falloffImage = light->falloffImage;
+	vLight->noSpecular = light->parms.noSpecular;
 	vLight->lightShader = light->lightShader;
 	vLight->shaderRegisters = NULL;		// allocated and evaluated in R_AddLightSurfaces
 

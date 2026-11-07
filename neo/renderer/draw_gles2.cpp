@@ -635,6 +635,14 @@ RB_GLSL_CreateSingleDrawInteractions(const drawSurf_t* surf, void (* DrawInterac
 		return;
 	}
 
+	// DG: support lights nospecular parm, if desired by mapper and/or user
+	// r_supportNoSpecular -1 only allows nospecular if the map enables
+	// it in the worldspawn by setting "allow_nospecular" "1"
+	// (vLight->noSpecular is a copy, the backend must not read vLight->lightDef)
+	const int noSpecVar = r_supportNoSpecular.GetInteger();
+	const bool allowNoSpecular = ( noSpecVar == -1 ) ? tr.allowNoSpecular : ( noSpecVar == 1 );
+	const bool skipSpecular = allowNoSpecular && vLight->noSpecular;
+
 	// change the scissor if needed
 	if ( r_useScissor.GetBool() && !backEnd.currentScissor.Equals(surf->scissorRect)) {
 		backEnd.currentScissor = surf->scissorRect;
@@ -749,6 +757,11 @@ RB_GLSL_CreateSingleDrawInteractions(const drawSurf_t* surf, void (* DrawInterac
 
 				if ( inter.specularImage ) {
 					RB_SubmittInteraction(&inter, DrawInteraction);
+				}
+
+				// jmarshall - add no specular support(great for fill lighting).
+				if ( skipSpecular ) {
+					break;
 				}
 
 				RB_SetDrawInteraction(surfaceStage, surfaceRegs, &inter.specularImage,

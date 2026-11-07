@@ -308,7 +308,8 @@ void idPlayerView::DamageImpulse( idVec3 localKickDir, const idDict *damageDef )
 		if ( blobTime ) {
 			screenBlob_t* blob = GetScreenBlob();
 			blob->startFadeTime = gameLocal.slow.time;
-			blob->finishTime = gameLocal.slow.time + blobTime * g_blobTime.GetFloat() * ( ( float )gameLocal.msec / USERCMD_MSEC );
+			// DG: use precise timing because gameLocal.msec varies by +/- 1 each frame
+			blob->finishTime = gameLocal.slow.time + blobTime * g_blobTime.GetFloat() * ( gameLocal.msecPrecise / USERCMD_MSEC_PRECISE );
 
 			const char* materialName = damageDef->GetString( "mtr_blob" );
 			blob->material = declManager->FindMaterial( materialName );
@@ -694,8 +695,44 @@ void idPlayerView::RenderPlayerView( idUserInterface *hud ) {
 	ScreenFade();
 
 	if ( net_clientLagOMeter.GetBool() && lagoMaterial && gameLocal.isClient ) {
-		renderSystem->SetColor4( 1.0f, 1.0f, 1.0f, 1.0f );
-		renderSystem->DrawStretchPic( 10.0f, 380.0f, 64.0f, 64.0f, 0.0f, 0.0f, 1.0f, 1.0f, lagoMaterial );
+		//#modified-fva; BEGIN
+		float x = 10.0f;
+		float y = 380.0f;
+		float w = 64.0f;
+		float h = 64.0f;
+		if (cvarSystem->GetCVarBool("cst_hudAdjustAspect")) {
+			// similar to CST_ANCHOR_BOTTOM_LEFT
+			int glWidth, glHeight;
+			renderSystem->GetGLSettings(glWidth, glHeight);
+			if (glWidth > 0 && glHeight > 0) {
+				float glAspectRatio = (float)glWidth / (float)glHeight;
+
+				const float vidWidth = SCREEN_WIDTH;
+				const float vidHeight = SCREEN_HEIGHT;
+				const float vidAspectRatio = (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT;
+
+				float modWidth = vidWidth;
+				float modHeight = vidHeight;
+				if (glAspectRatio >= vidAspectRatio) {
+					modWidth = modHeight * glAspectRatio;
+				} else {
+					modHeight = modWidth / glAspectRatio;
+				}
+
+				float xScale = vidWidth / modWidth;
+				float yScale = vidHeight / modHeight;
+				float xOffset = 0.0f;
+				float yOffset = vidHeight * (1.0f - yScale);
+
+				x = x * xScale + xOffset;
+				y = y * yScale + yOffset;
+				w *= xScale;
+				h *= yScale;
+			}
+		}
+		renderSystem->SetColor4(1.0f, 1.0f, 1.0f, 1.0f);
+		renderSystem->DrawStretchPic(x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, lagoMaterial);
+		//#modified-fva; END
 	}
 }
 

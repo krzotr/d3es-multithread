@@ -2,7 +2,7 @@
 
 #include <algorithm> // std::sort - TODO: replace with something custom..
 
-#include <SDL.h> // to show display size
+#include "sys/sys_sdl.h"
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 
@@ -1098,8 +1098,8 @@ static void InitBindingEntries()
 
 		{ "_attack",        "Attack"     , "#str_02112" },
 		{ "_impulse13",     "Reload"     , "#str_02115" },
-		{ "_impulse14",     "Prev. Weapon" , "#str_02113" },
-		{ "_impulse15",     "Next Weapon"  , "#str_02114" },
+		{ "_impulse15",     "Prev. Weapon" , "#str_02113" },
+		{ "_impulse14",     "Next Weapon"  , "#str_02114" },
 		{ "_zoom",          "Zoom View"    , "#str_02120" },
 		{ "clientDropWeapon", "Drop Weapon", "#str_04071" },
 
@@ -1546,7 +1546,7 @@ static void DrawOptions(CVarOption options[], int numOptions)
 static CVarOption controlOptions[] = {
 
 	CVarOption("Mouse Settings"),
-	CVarOption("sensitivity", "Sensitivity", OT_FLOAT, 1.0f, 30.0f),
+	CVarOption("sensitivity", "Sensitivity", OT_FLOAT, 0.01f, 30.0f),
 	CVarOption("m_smooth", "Smoothing Samples", OT_INT, 1, 8),
 	CVarOption("in_nograb", "Don't grab Mouse Cursor (for debugging/testing)", OT_BOOL),
 	CVarOption("m_invertLook", [](idCVar& cvar) {
@@ -1674,7 +1674,8 @@ static CVarOption videoOptionsImmediately[] = {
 				D3::ImGuiHooks::ShowWarningOverlay( "Capturing the Depth Buffer was disabled.\nEnabled it because soft particles need it!" );
 			}
 		}
-		AddCVarOptionTooltips( cvar );
+		const char* descr = "! Can slow down rendering !\nSoften particle transitions when player walks through them or they cross solid geometry. Needs r_enableDepthCapture.";
+		AddCVarOptionTooltips( cvar, descr );
 	} ),
 
 	CVarOption( "Advanced Options" ),
@@ -1705,6 +1706,9 @@ static int initialMode = 0;
 static int initialCustomVidRes[2];
 static int initialMSAAmode = 0;
 static int qualityPreset = 0;
+static int initialUsePrecomprTextures = 0;
+static int initialUseCompression = 0;
+static int initialUseNormalCompr = 0;
 
 static void SetVideoStuffFromCVars()
 {
@@ -1733,6 +1737,10 @@ static void SetVideoStuffFromCVars()
 		if ( qualityPreset == -1 )
 			qualityPreset = 1; // default to medium Quality
 	}
+
+	initialUsePrecomprTextures = globalImages->image_usePrecompressedTextures.GetInteger();
+	initialUseCompression = globalImages->image_useCompression.GetInteger();
+	initialUseNormalCompr = globalImages->image_useNormalCompression.GetInteger();
 }
 
 static bool VideoHasResettableChanges()
@@ -1751,6 +1759,15 @@ static bool VideoHasResettableChanges()
 		return true;
 	}
 	if ( initialMSAAmode != r_multiSamples.GetInteger() ) {
+		return true;
+	}
+	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger() ) {
+		return true;
+	}
+	if( initialUseCompression != globalImages->image_useCompression.GetInteger() ) {
+		return true;
+	}
+	if ( initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger() ) {
 		return true;
 	}
 
@@ -1774,13 +1791,32 @@ static bool VideoHasApplyableChanges()
 		return true;
 	}
 
+	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger() ) {
+		return true;
+	}
+	// Note: value of image_useNormalCompression is only relevant if image_usePrecompressedTextures is enabled
+	if ( initialUsePrecomprTextures
+	    && (initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger()
+	       || initialUseCompression != globalImages->image_useCompression.GetInteger()) )
+	{
+		return true;
+	}
+
 	return false;
 }
 
 
 static void ApplyVideoSettings()
 {
-	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, "vid_restart partial\n" );
+	const char* cmd = "vid_restart partial\n";
+	if ( initialUsePrecomprTextures != globalImages->image_usePrecompressedTextures.GetInteger()
+	    || initialUseNormalCompr != globalImages->image_useNormalCompression.GetInteger()
+	    || initialUseCompression != globalImages->image_useCompression.GetInteger() )
+	{
+		// these need a full restart (=> textures must be reloaded)
+		cmd = "vid_restart\n";
+	}
+	cmdSystem->BufferCommandText( CMD_EXEC_APPEND, cmd );
 }
 
 static void VideoResetChanges()
@@ -1793,6 +1829,9 @@ static void VideoResetChanges()
 	r_fullscreenDesktop.SetBool( initialFullscreenDesktop );
 
 	r_multiSamples.SetInteger( initialMSAAmode );
+	globalImages->image_usePrecompressedTextures.SetInteger( initialUsePrecomprTextures );
+	globalImages->image_useCompression.SetInteger( initialUseCompression );
+	globalImages->image_useNormalCompression.SetInteger( initialUseNormalCompr );
 }
 
 static void InitVideoOptionsMenu()
@@ -1902,9 +1941,15 @@ static void DrawVideoOptionsMenu()
 	}
 
 	// resolution info text
-	int sdlDisplayIdx = SDL_GetWindowDisplayIndex( SDL_GL_GetCurrentWindow() );
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	// in SDL3 it's a Display ID, in SDL2 a Display Index, in both cases the value
+	// can be fed into SDL_GetDisplayBounds()
+	SDL_DisplayID sdlDisplayId_x = SDL_GetDisplayForWindow( SDL_GL_GetCurrentWindow() );
+#else // SDL2
+	int sdlDisplayId_x = SDL_GetWindowDisplayIndex( SDL_GL_GetCurrentWindow() );
+#endif
 	SDL_Rect displayRect = {};
-	SDL_GetDisplayBounds( sdlDisplayIdx, &displayRect );
+	SDL_GetDisplayBounds( sdlDisplayId_x, &displayRect );
 	if ( (int)glConfig.winWidth != glConfig.vidWidth ) {
 		ImGui::TextDisabled( "Current Resolution: %g x %g (Physical: %d x %d)",
 		                     glConfig.winWidth, glConfig.winHeight, glConfig.vidWidth, glConfig.vidHeight );
@@ -1929,6 +1974,48 @@ static void DrawVideoOptionsMenu()
 		r_multiSamples.SetInteger( msaa );
 	}
 	AddCVarOptionTooltips( r_multiSamples, "Note: Not all GPUs/drivers support all modes, esp. not 16x!" );
+
+	int usePreComprTex = globalImages->image_usePrecompressedTextures.GetInteger();
+	if ( ImGui::Combo( "Use precompressed (.dds) textures", &usePreComprTex,
+	                   "No, only uncompressed\0Yes, no matter which format\0Only if high quality (BPCT/BC7)\0" ) )
+	{
+		globalImages->image_usePrecompressedTextures.SetInteger(usePreComprTex);
+		// by default I guess people also want compressed normal maps when using this
+		// especially relevant for retexturing packs that only ship BC7 DDS files
+		// (otherwise the lowres TGA normalmaps would be used)
+		if ( usePreComprTex ) {
+			cvarSystem->SetCVarInteger( "image_useNormalCompression", 2 );
+		}
+	}
+	const char* descr = "Use precompressed (.dds) textures. Faster loading, use less VRAM, possibly worse image quality.\n"
+			"May also be used by highres retexturing packs for BC7-compressed textures (there image quality is not noticeably impaired)";
+	AddCVarOptionTooltips( globalImages->image_usePrecompressedTextures, descr );
+
+	int useCompression = globalImages->image_useCompression.GetInteger();
+	if ( ImGui::Combo( "Compress uncompressed textures on load", &useCompression,
+	                   "Leave uncompressed (best quality)\0Compress with S3TC (aka DXT aka BC1-3)\0Compress with BPCT (BC7)\0" ) )
+	{
+		globalImages->image_useCompression.SetInteger(useCompression);
+	}
+	descr = "When loading non-precompressed textures, compress them so they use less VRAM.\n"
+			"Uncompressed has best quality. BC7 has better quality than S3TC, but may increase loading times";
+	AddCVarOptionTooltips( globalImages->image_useCompression, descr );
+
+	ImGui::BeginDisabled( !usePreComprTex && !useCompression );
+	bool useNormalCompr = globalImages->image_useNormalCompression.GetBool();
+	if ( ImGui::Checkbox( "Use compressed normalmaps", &useNormalCompr ) ) {
+		// image_useNormalCompression 1 is not supported by modern GPUs
+		globalImages->image_useNormalCompression.SetInteger(useNormalCompr ? 2 : 0);
+	}
+	if ( usePreComprTex ) {
+		const char* descr = "Also use precompressed textures for normalmaps or compress them on load.\n"
+		                    "Uncompressed often has better quality, but uses more VRAM.\n"
+		                    "When using highres retexturing packs, you should definitely enable this.";
+		AddCVarOptionTooltips( globalImages->image_useNormalCompression, descr );
+	} else {
+		AddTooltip( "Can only be used if (pre)compressed textures are enabled!" );
+	}
+	ImGui::EndDisabled();
 
 	// Apply Button
 	if ( !VideoHasApplyableChanges() ) {
@@ -1962,6 +2049,25 @@ static void DrawVideoOptionsMenu()
 	// options that take effect immediately, just by modifying their CVar:
 
 	DrawOptions( videoOptionsImmediately, IM_ARRAYSIZE(videoOptionsImmediately) );
+
+	ImGui::Separator();
+
+	if ( ImGui::TreeNode("OpenGL Info") ) {
+		ImGui::BeginDisabled();
+
+		ImGui::Text( "OpenGL vendor: %s", glConfig.vendor_string );
+		ImGui::Text( "OpenGL renderer: %s", glConfig.renderer_string );
+		ImGui::Text( "OpenGL version: %s", glConfig.version_string );
+
+		if ( glConfig.glDebugOutputAvailable && glConfig.haveDebugContext ) {
+			ImGui::Text( "    using an OpenGL debug context to show warnings from the OpenGL driver" );
+		}
+
+		ImGui::EndDisabled();
+		ImGui::TreePop();
+	} else {
+		AddTooltip( "Click to show information about the currently used Graphics Card (GPU)" );
+	}
 }
 
 static idStrList alDevices;
@@ -2227,7 +2333,15 @@ static CVarOption gameOptions[] = {
 	CVarOption( "ui_autoSwitch", "Auto Weapon Switch", OT_BOOL ),
 	CVarOption( "Visual" ),
 	CVarOption( "g_showHud", "Show HUD", OT_BOOL ),
-	CVarOption( "com_showFPS", "Show Framerate (FPS)", OT_BOOL ),
+	CVarOption( "com_showFPS", []( idCVar& cvar ) {
+		int curFormat = idMath::ClampInt( 0, 2, cvar.GetInteger() );
+		const char* choices = "Don't show framerate\0Show only framerate\0Show framerate and frame times (avg/min/max)\0";
+		if ( ImGui::Combo( "Show Framerate (FPS)", &curFormat, choices ) ) {
+			cvar.SetInteger( curFormat );
+		}
+		AddTooltip( "com_showFPS" );
+		AddDescrTooltip( cvar.GetDescription() );
+	} ),
 	CVarOption( "ui_showGun", "Show Gun Model", OT_BOOL ),
 	CVarOption( "g_decals", "Show Decals", OT_BOOL ),
 	CVarOption( "g_bloodEffects", "Show Blood and Gibs", OT_BOOL ),
@@ -2358,7 +2472,7 @@ static void DrawOtherOptionsMenu()
 
 static bool BeginTabChild( const char* name )
 {
-	bool ret = ImGui::BeginChild( name, ImVec2(0, 0), 0, ImGuiWindowFlags_NavFlattened );
+	bool ret = ImGui::BeginChild( name, ImVec2(0, 0), 0, ImGuiChildFlags_NavFlattened );
 	float itemWidth = fminf( ImGui::GetWindowWidth() * 0.5f, ImGui::GetFontSize() * 20.0f );
 	ImGui::PushItemWidth( itemWidth );
 	return ret;

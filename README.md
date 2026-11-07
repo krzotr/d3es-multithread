@@ -133,10 +133,11 @@ Compared to the original _DOOM 3_, the changes of _dhewm 3_ worth mentioning are
 - OpenAL for audio output, all OS-specific audio backends are gone
 - OpenAL EFX for EAX reverb effects (read: EAX-like sound effects on all platforms/hardware)
 - Gamepad support
+    - *Rumble* is currently **not** supported
 - Better support for widescreen (and arbitrary display resolutions)
 - A portable build system based on CMake
 - (Cross-)compilation with MinGW-w64
-- An advanced, mod-independent settings menu (opened with `F10` by default)
+- An **advanced**, mod-independent **settings menu** (opened with `F10` by default)
 
 See [Changelog.md](./Changelog.md) for a more complete changelog.
 
@@ -161,7 +162,7 @@ See https://dhewm3.org/#how-to-install for game data installation instructions.
 ## Configuration
 
 See [Configuration.md](./Configuration.md) for dhewm3-specific configuration, especially for 
-using gamepads or the new settings menu.
+using gamepads or the **new settings menu**.
 
 ## Compiling
 
@@ -280,8 +281,26 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 Then point CMake at your toolchain file:
 `cmake -DCMAKE_TOOLCHAIN_FILE=/path/to/Toolchain.cmake -DDHEWM3LIBS=/path/to/dhewm3-libs/i686-w64-mingw32 /path/to/repository/neo`
 
+**NOTE:** The `DHEWM3LIBS` path must be an **absolute path**, i.e. it must start with `/`!
+
 If you want to build for x86_64 aka AMD64 aka x64, replace all instances of `i686`
 in the toolchain file with `x86_64`.
+
+## Contributing
+
+Contributions in the form of Pull Requests or by creating (meaningful) bugreports are welcome!
+
+But please note that **only human-written code** is accepted for dhewm3.
+
+#### Do not submit code developed with the assistance of generative "AI"!
+
+... like Microsoft Copilot, Anthropic Claude, ChatGPT, etc.
+
+Don't generate bugreports/issues or comments with "AI" either.
+
+Doing it anyway may get you banned from this project.
+
+This is not open for discussion.
 
 ## Back End Rendering of Stencil Shadows
 
