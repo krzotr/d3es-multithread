@@ -273,6 +273,122 @@ static int isopaque(GLint width, GLint height, const GLvoid *pixels) {
 	return 1;
 }
 
+/*
+===============================================================================
+
+ETC cache, one file per image: <fs_savepath>/<game>/dds/<image>.etx
+
+	etxHeader_t
+	for each mip level, largest first, down to 1x1:
+		int		size
+		byte	data[size], zero padded to a multiple of 4
+
+The file holds the complete mip chain of final GPU data (after the image
+program, border fixups, mipmapping and ETC1/RGBA4444 conversion), like a
+.dds file, always starting at the full source size (limited only by the
+GPU's maximum texture size).
+
+The file is checked in ActuallyLoadImage() before the source image is read.
+The image_downSize* cvars only pick the level to start uploading from, and
+only that level and the smaller ones are read from the file, so changing
+the limits never needs a rebuild. The image is only built from the source
+again (and the file rewritten) if the source or the image parameters
+changed.
+
+===============================================================================
+*/
+
+#define ETX_MAGIC		0x58544544	// "DETX"
+#define ETX_VERSION		1
+#define ETX_MAX_LEVELS	16
+
+enum {
+	ETX_ETC1		= 0,
+	ETX_RGBA4444	= 1
+};
+
+typedef struct {
+	int			magic;
+	int			version;
+	int			format;			// ETX_ETC1 or ETX_RGBA4444, same for all levels
+	int			width;			// top level stored in the file (source size)
+	int			height;
+	int			numLevels;		// full chain, top level down to 1x1
+	int			sourceWidth;	// source image size, before any downsizing
+	int			sourceHeight;
+	int			depthIn;		// image depth before the image program ran
+	int			depthOut;		// image depth after the image program ran
+	int			repeat;
+	int			roundDown;		// image_roundDown changes the source size
+	long long	timestamp;		// newest source file (0 for files inside .pk4)
+} etxHeader_t;
+
+// set by ActuallyLoadImage() around GenerateImage(), so only images that were
+// really loaded from disk get cached (not generated or default images)
+static bool			etxWantCache = false;
+static int			etxDepthIn = 0;
+
+// level data collected while GenerateImage() uploads the mip levels
+static bool			etxBuilding = false;
+static int			etxFormat = 0;
+static int			etxLevels = 0;
+static byte *		etxData = NULL;
+static int			etxDataSize = 0;
+static int			etxDataAlloced = 0;
+static int			etxTopWidth = 0;
+static int			etxTopHeight = 0;
+static int			etxSourceWidth = 0;
+static int			etxSourceHeight = 0;
+
+static void EtxBegin( bool enable ) {
+	etxBuilding = enable;
+	etxFormat = 0;
+	etxLevels = 0;
+	etxDataSize = 0;
+}
+
+static void EtxAppendLevel( int format, const void *data, int size ) {
+	if ( !etxBuilding ) {
+		return;
+	}
+	if ( ( etxLevels > 0 && format != etxFormat ) || etxLevels >= ETX_MAX_LEVELS ) {
+		etxBuilding = false;	// shouldn't happen, just don't cache this image
+		return;
+	}
+	const int padded = ( size + 3 ) & ~3;
+	const int needed = etxDataSize + 4 + padded;
+	if ( needed > etxDataAlloced ) {
+		int newSize = etxDataAlloced ? etxDataAlloced : 256 * 1024;
+		while ( newSize < needed ) {
+			newSize *= 2;
+		}
+		byte *newData = (byte *)realloc( etxData, newSize );
+		if ( newData == NULL ) {
+			etxBuilding = false;
+			return;
+		}
+		etxData = newData;
+		etxDataAlloced = newSize;
+	}
+	memcpy( etxData + etxDataSize, &size, 4 );
+	memcpy( etxData + etxDataSize + 4, data, size );
+	memset( etxData + etxDataSize + 4 + size, 0, padded - size );
+	etxDataSize = needed;
+	etxFormat = format;
+	etxLevels++;
+}
+
+static void EtxFreeBuffer() {
+	// keep the buffer around during level loads, but don't hold on to a
+	// big one forever
+	if ( etxDataAlloced > 4 * 1024 * 1024 ) {
+		free( etxData );
+		etxData = NULL;
+		etxDataAlloced = 0;
+	}
+	etxDataSize = 0;
+}
+
 void rgba4444_convert_tex_image(
     char* cachefname,
     GLenum target,
@@ -285,9 +401,8 @@ void rgba4444_convert_tex_image(
     GLenum type,
     const GLvoid *pixels) {
 	unsigned char const *cpixels = (unsigned char const *)pixels;
-	unsigned short *rgba4444data = (unsigned short *)malloc(2*width*height+1);
-	((unsigned char*)rgba4444data)[0]=1;
-	rgba4444data=(unsigned short *)((unsigned char*)rgba4444data+1);
+	// aligned buffer for the driver (the original wrote 16-bit texels at an odd address)
+	unsigned short *rgba4444data = (unsigned short *)malloc(2*width*height);
 	int i;
 	for (i = 0; i < width * height; i++) {
 		unsigned char r,g,b,a;
@@ -297,10 +412,16 @@ void rgba4444_convert_tex_image(
 		a = cpixels[4*i+3]>>4;
 		rgba4444data[i] = r << 12 | g << 8 | b << 4 | a;
 	}
+	// 16-bit texels: rows of 1-pixel-wide mip levels are only 2 bytes long
+	qglPixelStorei(GL_UNPACK_ALIGNMENT, 2);
 	qglTexImage2D(target, level, format, width, height,border,format,GL_UNSIGNED_SHORT_4_4_4_4,rgba4444data);
-	rgba4444data=(unsigned short *)((unsigned char*)rgba4444data-1);
+	qglPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 	if (cachefname!=0) {
-		fileSystem->WriteFile(cachefname, rgba4444data, width*height*2+1);
+		unsigned char *filedata = (unsigned char *)malloc(width*height*2+1);
+		filedata[0]=1;
+		memcpy(filedata+1, rgba4444data, width*height*2);
+		fileSystem->WriteFile(cachefname, filedata, width*height*2+1);
+		free(filedata);
 	}
 	free(rgba4444data);
 }
@@ -371,23 +492,77 @@ int uploadetc(char* cachefname,GLenum target, GLint level, GLint internalformat,
 	if( sz == -1 )
 		return 1;
 
+	// The cache file is: 1 header byte (0 = ETC1, 1 = RGBA4444) + texel data.
+	// The data starts at an odd offset, so copy it to an aligned buffer
+	// before handing it to the driver.
 	if (tmp[0]==0) {
-		if (sz==etc1_data_size(width,height)+1) {
-			qglCompressedTexImage2D(target,level,GL_ETC1_RGB8_OES,width,height,0,etc1_data_size(width,height),tmp + 1);
+		const int dataSize = etc1_data_size(width,height);
+		if (sz==dataSize+1) {
+			void *data = malloc(dataSize);
+			memcpy(data, tmp + 1, dataSize);
+			qglCompressedTexImage2D(target,level,GL_ETC1_RGB8_OES,width,height,0,dataSize,data);
+			free(data);
 		} else {
 			failed=1;
 		}
 	} else {
-		if (sz==width*height*2+1) {
-			qglTexImage2D(target,level,format,width,height,border,format,GL_UNSIGNED_SHORT_4_4_4_4,tmp + 1);
+		const int dataSize = width*height*2;
+		if (sz==dataSize+1) {
+			void *data = malloc(dataSize);
+			memcpy(data, tmp + 1, dataSize);
+			qglTexImage2D(target,level,format,width,height,border,format,GL_UNSIGNED_SHORT_4_4_4_4,data);
+			free(data);
 		} else {
 			failed=1;
 		}
 	}
 
-	tmp--;
+	// NB: the original code did "tmp--" here and freed the wrong pointer,
+	// which crashed with "idHeap::Msize: invalid memory block" as soon as
+	// any cached texture was loaded.
 	fileSystem->FreeFile(tmp);
 	return failed;
+}
+
+/*
+================
+EtxCompressLevel
+
+Converts one mip level to ETC1 (opaque) or RGBA4444, adds it to the .etx
+cache and, if glLevel >= 0, uploads it as that GL mip level of the bound
+texture. Levels above the size currently used are only cached.
+================
+*/
+static void EtxCompressLevel( const byte *rgba, int width, int height, bool opaque, int glLevel ) {
+	if ( opaque ) {
+		const int size = etc1_data_size( width, height );
+		byte *etc1data = (byte *)malloc( size );
+#ifdef USE_RG_ETC1
+		rg_etc1::etc1_encode_image( rgba, width, height, 4, width * 4, etc1data );
+#else
+		etc1_encode_image( rgba, width, height, 4, width * 4, etc1data );
+#endif
+		if ( glLevel >= 0 ) {
+			qglCompressedTexImage2D( GL_TEXTURE_2D, glLevel, GL_ETC1_RGB8_OES, width, height, 0, size, etc1data );
+		}
+		EtxAppendLevel( ETX_ETC1, etc1data, size );
+		free( etc1data );
+	} else {
+		const int count = width * height;
+		unsigned short *rgba4444data = (unsigned short *)malloc( count * 2 );
+		for ( int i = 0; i < count; i++ ) {
+			rgba4444data[i] = ( rgba[4*i] >> 4 ) << 12 | ( rgba[4*i+1] >> 4 ) << 8
+							| ( rgba[4*i+2] >> 4 ) << 4 | ( rgba[4*i+3] >> 4 );
+		}
+		if ( glLevel >= 0 ) {
+			// rows of 1-pixel-wide levels are only 2 bytes long
+			qglPixelStorei( GL_UNPACK_ALIGNMENT, 2 );
+			qglTexImage2D( GL_TEXTURE_2D, glLevel, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, rgba4444data );
+			qglPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
+		}
+		EtxAppendLevel( ETX_RGBA4444, rgba4444data, count * 2 );
+		free( rgba4444data );
+	}
 }
 
 void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
@@ -400,21 +575,15 @@ void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalf
 		if (level == 0)
 			opaque = isopaque(width, height, pixels);
 
-		if (!r_useETC1Cache.GetBool())
-			cachefname=0;
-
-		if( uploadetc(cachefname, target, level, internalformat, width, height, border, format, type ) != 0 )
-		{
-			if (opaque)
-				etc1_compress_tex_image(cachefname,target, level, format, width, height, border, format, type, pixels);
-			else
-				rgba4444_convert_tex_image(cachefname,target, level, format, width, height, border, format, type, pixels);
-
-		}
+		// The old per-level cache files (.etc, .e01, .e02, ...) are no longer
+		// used: they could only be checked after the source image had already
+		// been loaded and processed. With r_useETC1cache, GenerateImage() uses
+		// GenerateETCCacheLevels() and the single-file .etx cache instead, which
+		// is read before the source image is touched (idImage::LoadETCCache).
+		if (opaque)
+			etc1_compress_tex_image(0,target, level, format, width, height, border, format, type, pixels);
 		else
-		{
-
-		}
+			rgba4444_convert_tex_image(0,target, level, format, width, height, border, format, type, pixels);
 	} else {
 		qglTexImage2D(target,level,internalformat,width,height,border,format,type,pixels);
 	}
@@ -474,6 +643,9 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 		return;
 	}
 
+	// collect the uploaded levels for the .etx cache
+	EtxBegin( etxWantCache && r_useETC1.GetBool() && r_useETC1Cache.GetBool() );
+
 	// don't let mip mapping smear the texture into the clamped border
 	if ( repeat == TR_CLAMP_TO_ZERO ) {
 		preserveBorder = true;
@@ -499,6 +671,14 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 
 	// select proper internal format before we resample
 	internalFormat = GL_RGBA;
+
+	// building the .etx cache: compress the whole mip chain (possibly from a
+	// bigger size than the one used now) and upload the levels we need
+	if ( etxBuilding ) {
+		GenerateETCCacheLevels( pic, width, height, scaled_width, scaled_height, preserveBorder );
+		GL_CheckErrors();
+		return;
+	}
 
 	// copy or resample data as appropriate for first MIP level
 	if ( ( scaled_width == width ) && ( scaled_height == height ) ) {
@@ -819,6 +999,360 @@ void idImage::ImageProgramStringToCompressedFileName( const char *imageProg, cha
 }
 
 /*
+================
+ETCCacheFileName
+
+dds/<image program as path>.etx
+================
+*/
+bool idImage::ETCCacheFileName( char *fileName ) const {
+	ImageProgramStringToCompressedFileName( imgName, fileName );
+	char *ext = strrchr( fileName, '.' );
+	if ( ext == NULL ) {
+		return false;
+	}
+	strcpy( ext, ".etx" );	// same length as ".dds"
+	return true;
+}
+
+/*
+================
+GenerateETCCacheLevels
+
+GenerateImage() for r_useETC1cache: builds the complete mip chain from the
+full source size down to 1x1, compresses every level into the .etx cache and
+uploads the levels from scaledWidth x scaledHeight down. Having every level
+cached means the image_downSize* cvars can be changed later without a rebuild.
+================
+*/
+void idImage::GenerateETCCacheLevels( const byte *pic, int width, int height,
+									  int scaledWidth, int scaledHeight, bool preserveBorder ) {
+	// the cache starts at the source size, only limited by what the GPU can
+	// take; every size here is on the same mip chain (both sides halved,
+	// clamped to 1), like GetDownsize() does
+	int topWidth = width;
+	int topHeight = height;
+	while ( topWidth > glConfig.maxTextureSize || topHeight > glConfig.maxTextureSize ) {
+		topWidth = Max( topWidth >> 1, 1 );
+		topHeight = Max( topHeight >> 1, 1 );
+	}
+
+	// number of levels between the cache top and the first uploaded level
+	int uploadStart = 0;
+	{
+		int w = topWidth;
+		int h = topHeight;
+		while ( ( w > scaledWidth || h > scaledHeight ) && ( w > 1 || h > 1 ) ) {
+			w = Max( w >> 1, 1 );
+			h = Max( h >> 1, 1 );
+			uploadStart++;
+		}
+		if ( w != scaledWidth || h != scaledHeight ) {
+			// shouldn't happen; upload from the cache top and don't cache
+			uploadStart = 0;
+			scaledWidth = topWidth;
+			scaledHeight = topHeight;
+			etxBuilding = false;
+		}
+	}
+
+	// shrink the source to the cache top level
+	byte *buffer = (byte *)R_StaticAlloc( width * height * 4 );
+	memcpy( buffer, pic, width * height * 4 );
+	int w = width;
+	int h = height;
+	while ( w > topWidth || h > topHeight ) {
+		byte *shrunk = R_MipMap( buffer, w, h, preserveBorder );
+		R_StaticFree( buffer );
+		buffer = shrunk;
+		w = Max( w >> 1, 1 );
+		h = Max( h >> 1, 1 );
+	}
+
+	byte *swapped = NULL;
+	if ( depth == TD_BUMP ) {
+		swapped = (byte *)R_StaticAlloc( w * h * 4 );
+	}
+
+	Bind();
+
+	bool opaque = false;
+	for ( int level = 0; ; level++ ) {
+		// zero the border on every level, any of them may be the top level
+		// that gets uploaded later
+		if ( repeat == TR_CLAMP_TO_ZERO ) {
+			byte rgba[4] = { 0, 0, 0, 255 };
+			R_SetBorderTexels( buffer, w, h, rgba );
+		} else if ( repeat == TR_CLAMP_TO_ZERO_ALPHA ) {
+			byte rgba[4] = { 255, 255, 255, 0 };
+			R_SetBorderTexels( buffer, w, h, rgba );
+		}
+
+		// swap the red and alpha for rxgb normal maps, see GenerateImage()
+		const byte *levelData = buffer;
+		if ( swapped ) {
+			for ( int i = 0; i < w * h * 4; i += 4 ) {
+				swapped[i + 0] = 0;
+				swapped[i + 1] = buffer[i + 1];
+				swapped[i + 2] = buffer[i + 2];
+				swapped[i + 3] = buffer[i + 0];
+			}
+			levelData = swapped;
+		}
+
+		// one format for the whole chain, decided on the top level
+		if ( level == 0 ) {
+			opaque = isopaque( w, h, levelData ) != 0;
+		}
+
+		EtxCompressLevel( levelData, w, h, opaque, level >= uploadStart ? level - uploadStart : -1 );
+
+		if ( w == 1 && h == 1 ) {
+			break;
+		}
+		byte *shrunk = R_MipMap( buffer, w, h, preserveBorder );
+		R_StaticFree( buffer );
+		buffer = shrunk;
+		w = Max( w >> 1, 1 );
+		h = Max( h >> 1, 1 );
+	}
+
+	R_StaticFree( buffer );
+	if ( swapped ) {
+		R_StaticFree( swapped );
+	}
+
+	uploadWidth = scaledWidth;
+	uploadHeight = scaledHeight;
+	type = TT_2D;
+
+	SetImageFilterAndRepeat();
+
+	if ( etxBuilding ) {
+		etxTopWidth = topWidth;
+		etxTopHeight = topHeight;
+		etxSourceWidth = width;
+		etxSourceHeight = height;
+		WriteETCCache();
+	}
+	etxBuilding = false;
+	EtxFreeBuffer();
+}
+
+/*
+================
+WriteETCCache
+
+Called at the end of GenerateETCCacheLevels() with the levels collected by
+EtxAppendLevel()
+================
+*/
+void idImage::WriteETCCache() const {
+	char filename[MAX_IMAGE_NAME];
+
+	if ( etxLevels != NumLevelsForImageSize( etxTopWidth, etxTopHeight ) ) {
+		return;		// incomplete mip chain, don't cache
+	}
+	if ( !ETCCacheFileName( filename ) ) {
+		return;
+	}
+
+	etxHeader_t header;
+	memset( &header, 0, sizeof( header ) );
+	header.magic = ETX_MAGIC;
+	header.version = ETX_VERSION;
+	header.format = etxFormat;
+	header.width = etxTopWidth;
+	header.height = etxTopHeight;
+	header.numLevels = etxLevels;
+	header.sourceWidth = etxSourceWidth;
+	header.sourceHeight = etxSourceHeight;
+	header.depthIn = etxDepthIn;
+	header.depthOut = depth;
+	header.repeat = repeat;
+	header.roundDown = globalImages->image_roundDown.GetInteger();
+	header.timestamp = (long long)timestamp;
+
+	const int total = sizeof( header ) + etxDataSize;
+	byte *buffer = (byte *)malloc( total );
+	if ( buffer == NULL ) {
+		return;
+	}
+	memcpy( buffer, &header, sizeof( header ) );
+	memcpy( buffer + sizeof( header ), etxData, etxDataSize );
+	fileSystem->WriteFile( filename, buffer, total );
+	free( buffer );
+}
+
+/*
+================
+EtxLevelSize
+
+Bytes of one level in an .etx file (without its size field and padding)
+================
+*/
+static int EtxLevelSize( int format, int width, int height ) {
+	return ( format == ETX_ETC1 ) ? (int)etc1_data_size( width, height ) : width * height * 2;
+}
+
+/*
+================
+LoadETCCache
+
+Uploads the image straight from its .etx file, without reading the source
+image. The current image_downSize* settings pick the first level to upload,
+and only that level and the smaller ones are read from the file (they are
+at its end). Returns false (and leaves the image untouched) if there is no
+usable cache file, so the caller builds the image from the source as usual
+(which rewrites the file).
+================
+*/
+bool idImage::LoadETCCache() {
+	char filename[MAX_IMAGE_NAME];
+
+	if ( !r_useETC1.GetBool() || !r_useETC1Cache.GetBool() || !glConfig.isInitialized ) {
+		return false;
+	}
+	if ( !ETCCacheFileName( filename ) ) {
+		return false;
+	}
+
+	idFile *f = fileSystem->OpenFileRead( filename );
+	if ( f == NULL ) {
+		return false;
+	}
+
+	const int len = f->Length();
+	etxHeader_t header;
+	bool valid = false;
+	ID_TIME_T sourceTime = 0;
+	int startLevel = -1;
+	int startOffset = 0;
+
+	if ( len >= (int)sizeof( header ) && f->Read( &header, sizeof( header ) ) == (int)sizeof( header ) ) {
+		valid = header.magic == ETX_MAGIC
+			&& header.version == ETX_VERSION
+			&& ( header.format == ETX_ETC1 || header.format == ETX_RGBA4444 )
+			&& header.width > 0 && header.height > 0
+			&& header.sourceWidth >= header.width && header.sourceHeight >= header.height
+			&& header.numLevels == NumLevelsForImageSize( header.width, header.height )
+			&& header.depthIn == depth
+			&& header.repeat == repeat
+			&& header.roundDown == globalImages->image_roundDown.GetInteger();
+	}
+
+	if ( valid ) {
+		// the size the current settings want, see GenerateImage()
+		const textureDepth_t savedDepth = depth;
+		int targetWidth = header.sourceWidth;
+		int targetHeight = header.sourceHeight;
+		depth = (textureDepth_t)header.depthOut;
+		GetDownsize( targetWidth, targetHeight );
+		depth = savedDepth;
+
+		// find that size in the cached chain, and check the file length;
+		// the level sizes follow from the header, so this needs no reads
+		int offset = sizeof( header );
+		int w = header.width;
+		int h = header.height;
+		for ( int level = 0; level < header.numLevels; level++ ) {
+			if ( startLevel < 0 && w == targetWidth && h == targetHeight ) {
+				startLevel = level;
+				startOffset = offset;
+			}
+			offset += 4 + ( ( EtxLevelSize( header.format, w, h ) + 3 ) & ~3 );
+			w = Max( w >> 1, 1 );
+			h = Max( h >> 1, 1 );
+		}
+		// startLevel < 0: the settings want a bigger size than the cache has
+		// (only if the source or the GPU texture size limit changed)
+		valid = ( startLevel >= 0 && offset == len );
+	}
+
+	if ( valid ) {
+		// only the timestamps, the source image isn't loaded
+		R_LoadImageProgram( imgName, NULL, NULL, NULL, &sourceTime, NULL );
+		valid = ( (long long)sourceTime == header.timestamp );
+	}
+
+	// read the levels we need
+	byte *data = NULL;
+	const int dataSize = len - startOffset;
+	if ( valid ) {
+		data = (byte *)malloc( dataSize );
+		valid = data != NULL
+			&& f->Seek( startOffset, FS_SEEK_SET ) == 0
+			&& f->Read( data, dataSize ) == dataSize;
+	}
+
+	fileSystem->CloseFile( f );
+
+	// check the size fields before touching GL
+	if ( valid ) {
+		int offset = 0;
+		int w = Max( header.width >> startLevel, 1 );
+		int h = Max( header.height >> startLevel, 1 );
+		for ( int level = startLevel; level < header.numLevels; level++ ) {
+			int size;
+			memcpy( &size, data + offset, 4 );
+			if ( size != EtxLevelSize( header.format, w, h ) ) {
+				valid = false;
+				break;
+			}
+			offset += 4 + ( ( size + 3 ) & ~3 );
+			w = Max( w >> 1, 1 );
+			h = Max( h >> 1, 1 );
+		}
+	}
+
+	if ( !valid ) {
+		free( data );
+		return false;
+	}
+
+	PurgeImage();
+	qglGenTextures( 1, &texnum );
+	Bind();
+
+	// RGBA4444 rows of 1-pixel-wide levels are only 2 bytes long
+	qglPixelStorei( GL_UNPACK_ALIGNMENT, 2 );
+
+	int offset = 0;
+	int w = Max( header.width >> startLevel, 1 );
+	int h = Max( header.height >> startLevel, 1 );
+	uploadWidth = w;
+	uploadHeight = h;
+	for ( int level = startLevel; level < header.numLevels; level++ ) {
+		int size;
+		memcpy( &size, data + offset, 4 );
+		// malloc-aligned buffer, every level starts at a multiple of 4
+		const void *levelData = data + offset + 4;
+		const int glLevel = level - startLevel;
+		if ( header.format == ETX_ETC1 ) {
+			qglCompressedTexImage2D( GL_TEXTURE_2D, glLevel, GL_ETC1_RGB8_OES, w, h, 0, size, levelData );
+		} else {
+			qglTexImage2D( GL_TEXTURE_2D, glLevel, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, levelData );
+		}
+		offset += 4 + ( ( size + 3 ) & ~3 );
+		w = Max( w >> 1, 1 );
+		h = Max( h >> 1, 1 );
+	}
+
+	qglPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
+
+	free( data );
+
+	type = TT_2D;
+	internalFormat = GL_RGBA;
+	depth = (textureDepth_t)header.depthOut;
+	timestamp = sourceTime;
+
+	SetImageFilterAndRepeat();
+	GL_CheckErrors();
+	return true;
+}
+
+/*
 ==================
 NumLevelsForImageSize
 ==================
@@ -904,6 +1438,11 @@ void	idImage::ActuallyLoadImage( bool fromBind ) {
 	} else {
 		// see if we have a pre-generated image file that is
 		// already image processed and compressed
+		if ( LoadETCCache() ) {
+			return;
+		}
+
+		const int depthIn = depth;
 
 		R_LoadImageProgram( imgName, &pic, &width, &height, &timestamp, &depth );
 
@@ -913,7 +1452,10 @@ void	idImage::ActuallyLoadImage( bool fromBind ) {
 			return;
 		}
 
+		etxWantCache = true;
+		etxDepthIn = depthIn;
 		GenerateImage( pic, width, height, filter, allowDownSize, repeat, depth );
+		etxWantCache = false;
 
 		R_StaticFree( pic );
 	}
