@@ -210,6 +210,13 @@ public:
 	void		ImageProgramStringToCompressedFileName( const char *imageProg, char *fileName ) const;
 	int			NumLevelsForImageSize( int width, int height ) const;
 
+	// single-file ETC1/RGBA4444 cache (r_useETC1 + r_useETC1cache), see Image_load.cpp
+	bool		ETCCacheFileName( char *fileName ) const;
+	bool		LoadETCCache();
+	void		WriteETCCache() const;
+	void		GenerateETCCacheLevels( const byte *pic, int width, int height,
+										int scaledWidth, int scaledHeight, bool preserveBorder );
+
 	// data commonly accessed is grouped here
 	static const int TEXTURE_NOT_LOADED = -1;
 	GLuint				texnum;					// gl texture binding, will be TEXTURE_NOT_LOADED if not loaded
