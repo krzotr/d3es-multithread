@@ -92,6 +92,7 @@ typedef struct {
 	double	etxTimestampMs;		// looking up the source images' timestamps
 	double	etxReadMs;			// reading the mip levels
 	double	etxUploadMs;		// glCompressedTexImage2D / glTexImage2D
+	int		etxUploadCalls;		// mip levels uploaded
 	int		etxBytes;			// mip level data read
 	// images with no usable .etx file, built from the source image (and cached)
 	int		etxMisses;

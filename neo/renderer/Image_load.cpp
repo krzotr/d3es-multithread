@@ -1319,6 +1319,13 @@ when the context is OpenGL ES 3 or later. Render thread only.
 static idCVar r_etcTexStorage( "r_etcTexStorage", "1", CVAR_RENDERER | CVAR_BOOL,
 	"allocate the whole mip chain with glTexStorage2D before uploading an .etx image (needs OpenGL ES 3)" );
 
+// Each level upload seems to cost about the same on the Mali driver, whatever its
+// size, so the smallest levels cost as much as the biggest one. An immutable
+// texture (glTexStorage2D) is complete with fewer levels than the full chain, so
+// the levels below this size can simply be left out. Only with r_etcTexStorage.
+static idCVar r_etcMinMipSize( "r_etcMinMipSize", "1", CVAR_RENDERER | CVAR_INTEGER,
+	"with r_etcTexStorage: don't upload .etx mip levels smaller than this (1 = the whole chain)", 1, 256 );
+
 #ifndef GL_COMPRESSED_RGB8_ETC2
 #define GL_COMPRESSED_RGB8_ETC2		0x9274
 #endif
@@ -1350,6 +1357,7 @@ static bool EtxUseTexStorage( void ) {
 static double	etxLastTimestampMs;
 static double	etxLastReadMs;
 static double	etxLastUploadMs;
+static int		etxLastUploadCalls;
 static int		etxLastBytes;
 
 bool idImage::LoadETCCache() {
@@ -1369,6 +1377,7 @@ bool idImage::LoadETCCache() {
 		timing.etxTimestampMs += etxLastTimestampMs;
 		timing.etxReadMs += etxLastReadMs;
 		timing.etxUploadMs += etxLastUploadMs;
+		timing.etxUploadCalls += etxLastUploadCalls;
 		timing.etxBytes += etxLastBytes;
 		return true;
 	}
@@ -1514,11 +1523,18 @@ bool idImage::LoadETCFile( const char *filename ) {
 	// data, and unlike GL_ETC1_RGB8_OES that format works with glTexStorage2D and
 	// glCompressedTexSubImage2D.
 	bool useStorage = EtxUseTexStorage();
+	int endLevel = header.numLevels;		// one past the last level uploaded
 	if ( useStorage ) {
+		// leave out the levels below r_etcMinMipSize, but keep at least one
+		const int minSize = r_etcMinMipSize.GetInteger();
+		while ( endLevel - 1 > startLevel
+			&& Max( header.width >> ( endLevel - 1 ), header.height >> ( endLevel - 1 ) ) < minSize ) {
+			endLevel--;
+		}
 		// clear older errors, so the check below is about this call only
 		for ( int i = 0; i < 8 && qglGetError() != GL_NO_ERROR; i++ ) {
 		}
-		etxTexStorage2D( GL_TEXTURE_2D, header.numLevels - startLevel,
+		etxTexStorage2D( GL_TEXTURE_2D, endLevel - startLevel,
 			header.format == ETX_ETC1 ? GL_COMPRESSED_RGB8_ETC2 : GL_RGBA4, w, h );
 		const GLenum error = qglGetError();
 		if ( error != GL_NO_ERROR ) {
@@ -1527,13 +1543,15 @@ bool idImage::LoadETCFile( const char *filename ) {
 			common->Printf( "ETC cache: glTexStorage2D failed (0x%x), uploading level by level\n", error );
 			etxTexStorageFailed = true;
 			useStorage = false;
+			endLevel = header.numLevels;
 			qglDeleteTextures( 1, &texnum );
 			qglGenTextures( 1, &texnum );
 			Bind();
 		}
 	}
 
-	for ( int level = startLevel; level < header.numLevels; level++ ) {
+	etxLastUploadCalls = endLevel - startLevel;
+	for ( int level = startLevel; level < endLevel; level++ ) {
 		int size;
 		memcpy( &size, data + offset, 4 );
 		// malloc-aligned buffer, every level starts at a multiple of 4

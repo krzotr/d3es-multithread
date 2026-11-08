@@ -100,10 +100,10 @@ static void LoadTiming_PrintImages( const char *label, const loadTimingImages_t 
 		images.ms > 0.0 ? mb * 1000.0 / images.ms : 0.0 );
 	if ( images.etxHits > 0 || images.etxMisses > 0 ) {
 		const double etxMb = images.etxBytes / ( 1024.0 * 1024.0 );
-		common->Printf( "  etx cache: %d hits: find=%.0f timestamps=%.0f read=%.0f (%.1f MB) upload=%.0f msec; "
+		common->Printf( "  etx cache: %d hits: find=%.0f timestamps=%.0f read=%.0f (%.1f MB) upload=%.0f msec (%d levels); "
 			"%d built from source in %.0f msec\n",
 			images.etxHits, images.etxFindMs, images.etxTimestampMs, images.etxReadMs, etxMb, images.etxUploadMs,
-			images.etxMisses, images.etxMissMs );
+			images.etxUploadCalls, images.etxMisses, images.etxMissMs );
 	}
 }
 
@@ -123,6 +123,7 @@ static void LoadTiming_AddImageStats( loadTimingImages_t &dst, const loadTimingI
 	dst.etxTimestampMs += sign * src.etxTimestampMs;
 	dst.etxReadMs += sign * src.etxReadMs;
 	dst.etxUploadMs += sign * src.etxUploadMs;
+	dst.etxUploadCalls += sign * src.etxUploadCalls;
 	dst.etxBytes += sign * src.etxBytes;
 	dst.etxMisses += sign * src.etxMisses;
 	dst.etxMissMs += sign * src.etxMissMs;
