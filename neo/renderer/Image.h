@@ -211,8 +211,9 @@ public:
 	int			NumLevelsForImageSize( int width, int height ) const;
 
 	// single-file ETC1/RGBA4444 cache (r_useETC1 + r_useETC1cache), see Image_load.cpp
-	bool		ETCCacheFileName( char *fileName ) const;
+	bool		ETCCacheFileName( char *fileName, int variantDepth ) const;
 	bool		LoadETCCache();
+	bool		LoadETCFile( const char *fileName );
 	void		WriteETCCache() const;
 	void		GenerateETCCacheLevels( const byte *pic, int width, int height,
 										int scaledWidth, int scaledHeight, bool preserveBorder );
