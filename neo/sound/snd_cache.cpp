@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "framework/FileSystem.h"
+#include "framework/LoadTiming.h"
 
 #include "sound/snd_local.h"
 
@@ -431,6 +432,8 @@ Loads based on name, possibly doing a MakeDefault if necessary
 ===================
 */
 void idSoundSample::Load( void ) {
+	idLoadTimingScope loadTiming( LT_SOUND_SAMPLE );
+
 	defaultSound = false;
 	purged = false;
 	hardwareBuffer = false;

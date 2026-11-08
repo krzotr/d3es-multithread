@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/EventLoop.h"
 #include "framework/Session.h"
 #include "framework/DemoFile.h"
+#include "framework/LoadTiming.h"
 #include "renderer/ModelManager.h"
 #include "renderer/Material.h"
 #include "renderer/GuiModel.h"
@@ -683,6 +684,10 @@ static void Pi_FrameLog( double mainWaitMs ) {
 		piFrameStats.draws, piFrameStats.shadowDraws );
 }
 
+// images the render thread loaded in its last frame task, for the level load timing
+static double	backendImageMs = 0.0;
+static int		backendImageCount = 0;
+
 void idRenderSystemLocal::BackendThreadTask()
 {
 	const double taskStart = Pi_NowMs();
@@ -698,10 +703,16 @@ void idRenderSystemLocal::BackendThreadTask()
 	}
 
 	// Load all images
+	const double imagesStart = LoadTiming_Now();
+	int imagesLoaded = 0;
 	while( (img = globalImages->GetNextAllocImage()) != NULL )
 	{
 		img->ActuallyLoadImage( false );
+		imagesLoaded++;
 	}
+	// read by the main thread once it has waited for the images (RenderCommands)
+	backendImageMs = imagesLoaded ? LoadTiming_Now() - imagesStart : 0.0;
+	backendImageCount = imagesLoaded;
 
 
 	if( useSpinLock )
@@ -854,6 +865,7 @@ void idRenderSystemLocal::RenderCommands(renderCrop_t *pc, byte *pix)
 	{
 		Sys_WaitForEvent(TRIGGER_EVENT_IMAGES_PROCESSES);
 	}
+	LoadTiming_AddImageTime( backendImageMs, backendImageCount );
 
 	// If we are waiting for pixel data, make sure we wait for the backend to finish
 	if(pix)
