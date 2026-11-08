@@ -85,6 +85,17 @@ typedef struct {
 	int		count;
 	double	ms;
 	int		bytesRead;			// fileSystem read count while loading them
+
+	// ETC cache (r_useETC1Cache, Image_load.cpp): images loaded from an .etx file
+	int		etxHits;
+	double	etxFindMs;			// finding/opening the file (both names) and checking the header
+	double	etxTimestampMs;		// looking up the source images' timestamps
+	double	etxReadMs;			// reading the mip levels
+	double	etxUploadMs;		// glCompressedTexImage2D / glTexImage2D
+	int		etxBytes;			// mip level data read
+	// images with no usable .etx file, built from the source image (and cached)
+	int		etxMisses;
+	double	etxMissMs;
 } loadTimingImages_t;
 
 void	LoadTiming_AddImages( const loadTimingImages_t &images );

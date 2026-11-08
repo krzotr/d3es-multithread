@@ -30,6 +30,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "idlib/hashing/MD4.h"
 #include "renderer/tr_local.h"
 #include "renderer/Cinematic.h"
+#include "framework/LoadTiming.h"
 
 #include "renderer/Image.h"
 
@@ -1300,16 +1301,30 @@ ETCCacheFileName). With "developer 1" the reason a file is rejected is
 printed to the console.
 ================
 */
+// the parts of the last successful LoadETCFile, for the level load timing
+static double	etxLastTimestampMs;
+static double	etxLastReadMs;
+static double	etxLastUploadMs;
+static int		etxLastBytes;
+
 bool idImage::LoadETCCache() {
 	char filename[MAX_IMAGE_NAME * 2];
 
 	if ( !r_useETC1.GetBool() || !r_useETC1Cache.GetBool() || !glConfig.isInitialized ) {
 		return false;
 	}
-	if ( ETCCacheFileName( filename, -1 ) && LoadETCFile( filename ) ) {
-		return true;
-	}
-	if ( ETCCacheFileName( filename, depth ) && LoadETCFile( filename ) ) {
+	const double start = LoadTiming_Now();
+	if ( ( ETCCacheFileName( filename, -1 ) && LoadETCFile( filename ) )
+		|| ( ETCCacheFileName( filename, depth ) && LoadETCFile( filename ) ) ) {
+		// render thread only (ActuallyLoadImage), see loadTimingRenderThreadImages
+		loadTimingImages_t &timing = loadTimingRenderThreadImages;
+		const double parts = etxLastTimestampMs + etxLastReadMs + etxLastUploadMs;
+		timing.etxHits++;
+		timing.etxFindMs += LoadTiming_Now() - start - parts;
+		timing.etxTimestampMs += etxLastTimestampMs;
+		timing.etxReadMs += etxLastReadMs;
+		timing.etxUploadMs += etxLastUploadMs;
+		timing.etxBytes += etxLastBytes;
 		return true;
 	}
 	return false;
@@ -1382,7 +1397,9 @@ bool idImage::LoadETCFile( const char *filename ) {
 
 	if ( valid ) {
 		// only the timestamps, the source image isn't loaded
+		const double timestampStart = LoadTiming_Now();
 		R_LoadImageProgram( imgName, NULL, NULL, NULL, &sourceTime, NULL );
+		etxLastTimestampMs = LoadTiming_Now() - timestampStart;
 		valid = ( (long long)sourceTime == header.timestamp );
 		if ( !valid ) {
 			reason = "source image changed (timestamp)";
@@ -1394,10 +1411,13 @@ bool idImage::LoadETCFile( const char *filename ) {
 	const int dataSize = len - startOffset;
 	if ( valid ) {
 		reason = NULL;
+		const double readStart = LoadTiming_Now();
 		data = (byte *)malloc( dataSize );
 		valid = data != NULL
 			&& f->Seek( startOffset, FS_SEEK_SET ) == 0
 			&& f->Read( data, dataSize ) == dataSize;
+		etxLastReadMs = LoadTiming_Now() - readStart;
+		etxLastBytes = dataSize;
 	}
 
 	fileSystem->CloseFile( f );
@@ -1431,6 +1451,7 @@ bool idImage::LoadETCFile( const char *filename ) {
 		return false;
 	}
 
+	const double uploadStart = LoadTiming_Now();
 	PurgeImage();
 	qglGenTextures( 1, &texnum );
 	Bind();
@@ -1460,6 +1481,7 @@ bool idImage::LoadETCFile( const char *filename ) {
 	}
 
 	qglPixelStorei( GL_UNPACK_ALIGNMENT, 4 );
+	etxLastUploadMs = LoadTiming_Now() - uploadStart;
 
 	free( data );
 
@@ -1559,9 +1581,18 @@ void	idImage::ActuallyLoadImage( bool fromBind ) {
 	} else {
 		// see if we have a pre-generated image file that is
 		// already image processed and compressed
+		const double loadStart = LoadTiming_Now();
 		if ( LoadETCCache() ) {
 			return;
 		}
+		// for the level load timing, see loadTimingRenderThreadImages
+		struct etxMissTiming_t {
+			double start;
+			~etxMissTiming_t() {
+				loadTimingRenderThreadImages.etxMisses++;
+				loadTimingRenderThreadImages.etxMissMs += LoadTiming_Now() - start;
+			}
+		} etxMissTiming = { loadStart };
 
 		const int depthIn = depth;
 

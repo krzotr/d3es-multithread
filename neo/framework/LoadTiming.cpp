@@ -98,6 +98,34 @@ static void LoadTiming_PrintImages( const char *label, const loadTimingImages_t 
 	const double mb = images.bytesRead / ( 1024.0 * 1024.0 );
 	common->Printf( "%s: %d in %.0f msec, %.1f MB read (%.1f MB/s)\n", label, images.count, images.ms, mb,
 		images.ms > 0.0 ? mb * 1000.0 / images.ms : 0.0 );
+	if ( images.etxHits > 0 || images.etxMisses > 0 ) {
+		const double etxMb = images.etxBytes / ( 1024.0 * 1024.0 );
+		common->Printf( "  etx cache: %d hits: find=%.0f timestamps=%.0f read=%.0f (%.1f MB) upload=%.0f msec; "
+			"%d built from source in %.0f msec\n",
+			images.etxHits, images.etxFindMs, images.etxTimestampMs, images.etxReadMs, etxMb, images.etxUploadMs,
+			images.etxMisses, images.etxMissMs );
+	}
+}
+
+/*
+================
+LoadTiming_AddImageStats
+
+dst += sign * src
+================
+*/
+static void LoadTiming_AddImageStats( loadTimingImages_t &dst, const loadTimingImages_t &src, int sign ) {
+	dst.count += sign * src.count;
+	dst.ms += sign * src.ms;
+	dst.bytesRead += sign * src.bytesRead;
+	dst.etxHits += sign * src.etxHits;
+	dst.etxFindMs += sign * src.etxFindMs;
+	dst.etxTimestampMs += sign * src.etxTimestampMs;
+	dst.etxReadMs += sign * src.etxReadMs;
+	dst.etxUploadMs += sign * src.etxUploadMs;
+	dst.etxBytes += sign * src.etxBytes;
+	dst.etxMisses += sign * src.etxMisses;
+	dst.etxMissMs += sign * src.etxMissMs;
 }
 
 /*
@@ -155,17 +183,13 @@ the load summary was printed.
 */
 void LoadTiming_AddImages( const loadTimingImages_t &images ) {
 	if ( images.count > 0 ) {
-		ltImages.count += images.count;
-		ltImages.ms += images.ms;
-		ltImages.bytesRead += images.bytesRead;
+		LoadTiming_AddImageStats( ltImages, images, 1 );
 		return;
 	}
 	if ( ltImageReportPending ) {
 		ltImageReportPending = false;
-		loadTimingImages_t after;
-		after.count = ltImages.count - ltImagesAtPrint.count;
-		after.ms = ltImages.ms - ltImagesAtPrint.ms;
-		after.bytesRead = ltImages.bytesRead - ltImagesAtPrint.bytesRead;
+		loadTimingImages_t after = ltImages;
+		LoadTiming_AddImageStats( after, ltImagesAtPrint, -1 );
 		LoadTiming_PrintImages( "load images after the map load", after );
 		LoadTiming_PrintImages( "load images in all", ltImages );
 	}
