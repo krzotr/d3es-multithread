@@ -749,6 +749,7 @@ set(src_framework
 	framework/File.cpp
 	framework/FileSystem.cpp
 	framework/KeyInput.cpp
+	framework/LoadTiming.cpp
 	framework/UsercmdGen.cpp
 	framework/Session_menu.cpp
 	framework/Session.cpp

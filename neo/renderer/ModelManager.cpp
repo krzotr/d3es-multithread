@@ -28,6 +28,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "framework/CVarSystem.h"
+#include "framework/LoadTiming.h"
 #include "framework/Session.h"
 #include "renderer/RenderWorld.h"
 #include "renderer/Model_local.h"
@@ -271,6 +272,7 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 		if ( canonical.Icmp( model->Name() ) == 0 ) {
 			if ( !model->IsLoaded() ) {
 				// reload it if it was purged
+				idLoadTimingScope loadTiming( LoadTiming_ModelBucket( model->Name() ) );
 				model->LoadModel();
 			} else if ( insideLevelLoad && !model->IsLevelLoadReferenced() ) {
 				// we are reusing a model already in memory, but
@@ -290,6 +292,9 @@ idRenderModel *idRenderModelManagerLocal::GetModel( const char *modelName, bool 
 	idRenderModel	*model;
 
 	canonical.ExtractFileExtension( extension );
+
+	// the material decls it parses on the way are counted apart (scopes are exclusive)
+	idLoadTimingScope loadTiming( LoadTiming_ModelBucket( modelName ) );
 
 	if ( ( extension.Icmp( "ase" ) == 0 ) || ( extension.Icmp( "lwo" ) == 0 ) || ( extension.Icmp( "flt" ) == 0 ) ) {
 		model = new idRenderModelStatic;
@@ -558,7 +563,10 @@ void idRenderModelManagerLocal::EndLevelLoad() {
 		if ( model->IsLevelLoadReferenced() && !model->IsLoaded() && model->IsReloadable() ) {
 
 			loadCount++;
-			model->LoadModel();
+			{
+				idLoadTimingScope loadTiming( LoadTiming_ModelBucket( model->Name() ) );
+				model->LoadModel();
+			}
 
 			if ( ( loadCount & 15 ) == 0 ) {
 				session->PacifierUpdate();

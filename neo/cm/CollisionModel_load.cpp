@@ -47,6 +47,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "sys/platform.h"
 #include "idlib/Timer.h"
+#include "framework/LoadTiming.h"
 #include "renderer/Model.h"
 #include "renderer/ModelManager.h"
 #include "renderer/RenderWorld.h"
@@ -3118,6 +3119,9 @@ cm_model_t *idCollisionModelManagerLocal::LoadRenderModel( const char *fileName 
 	if ( !renderModelManager->CheckModel( fileName ) ) {
 		return NULL;
 	}
+
+	// the render model parse is counted apart (scopes are exclusive)
+	idLoadTimingScope loadTiming( LT_CM_CONVERT );
 
 	renderModel = renderModelManager->FindModel( fileName );
 

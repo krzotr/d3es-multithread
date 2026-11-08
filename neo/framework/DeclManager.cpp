@@ -40,6 +40,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/DeclParticle.h"
 #include "framework/DeclSkin.h"
 #include "framework/DeclTable.h"
+#include "framework/LoadTiming.h"
 #include "renderer/Material.h"
 #include "sound/sound.h"
 
@@ -2176,6 +2177,9 @@ idDeclLocal::ParseLocal
 */
 void idDeclLocal::ParseLocal( void ) {
 	bool generatedDefaultText = false;
+
+	// decls this one parses on the way (a material's tables, a sound shader's samples) are counted apart
+	idLoadTimingScope loadTiming( type == DECL_MATERIAL ? LT_DECL_MATERIAL : LT_DECL_OTHER );
 
 	AllocateSelf();
 

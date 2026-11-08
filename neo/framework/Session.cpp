@@ -33,6 +33,7 @@ If you have questions concerning this license or the applicable additional terms
 #include "framework/Console.h"
 #include "framework/Game.h"
 #include "framework/EventLoop.h"
+#include "framework/LoadTiming.h"
 #include "renderer/ModelManager.h"
 
 #include "framework/Session_local.h"
@@ -1585,6 +1586,10 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	fullMapName += mapString;
 	fullMapName.StripFileExtension();
 
+	// load timing, printed after "msec to load" (framework/LoadTiming.h)
+	LoadTiming_Reset();
+	const double loadStartTime = LoadTiming_Now();
+
 	// shut down the existing game if it is running
 	UnloadMap();
 
@@ -1640,6 +1645,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	}
 
 	int start = Sys_Milliseconds();
+	// pre: unloading the previous map, reloading the GUIs, the loading screen's first second
+	const double preEndTime = LoadTiming_Now();
 
 	common->Printf( "----- Map Initialization -----\n" );
 	common->Printf( "Map: %s\n", mapString.c_str() );
@@ -1648,6 +1655,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 	if ( !rw->InitFromMap( fullMapName ) ) {
 		common->Error( "couldn't load %s", fullMapName.c_str() );
 	}
+	// proc: the .proc file (world geometry, portals)
+	const double procEndTime = LoadTiming_Now();
 
 	// for the synchronous networking we needed to roll the angles over from
 	// level to level, but now we can just clear everything
@@ -1684,6 +1693,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 			game->SpawnPlayer( i );
 		}
 	}
+	// game: collision map, AAS, entity spawn and everything they pull in (or the savegame)
+	const double gameEndTime = LoadTiming_Now();
 
 	// actually purge/load the media
 	if ( !reloadingSameMap ) {
@@ -1693,6 +1704,8 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 		SetBytesNeededForMapLoad( mapString.c_str(), fileSystem->GetReadCount() );
 	}
 	uiManager->EndLevelLoad();
+	// media: purged models reloaded, images queued for the render thread, unused media purged
+	const double mediaEndTime = LoadTiming_Now();
 
 	if ( !idAsyncNetwork::IsActive() && !loadingSaveGame ) {
 		// run a few frames to allow everything to settle
@@ -1700,9 +1713,12 @@ void idSessionLocal::ExecuteMapChange( bool noFadeWipe ) {
 			game->RunFrame( mapSpawnData.mapSpawnUsercmd );
 		}
 	}
+	const double settleEndTime = LoadTiming_Now();
 
 	int	msec = Sys_Milliseconds() - start;
 	common->Printf( "%6d msec to load %s\n", msec, mapString.c_str() );
+	LoadTiming_Print( preEndTime - loadStartTime, procEndTime - preEndTime, gameEndTime - procEndTime,
+		mediaEndTime - gameEndTime, settleEndTime - mediaEndTime );
 
 	// let the renderSystem generate interactions now that everything is spawned
 	rw->GenerateAllInteractions();
@@ -2474,6 +2490,9 @@ void idSessionLocal::PacifierUpdate() {
 		return;
 	}
 	lastPacifierTime = time;
+
+	// a redraw can come from a print inside any timed load step: keep it out of that step
+	idLoadTimingScope loadTiming( LT_LOADING_SCREEN );
 
 	if ( guiLoading && bytesNeededForMapLoad ) {
 		float n = fileSystem->GetReadCount();
