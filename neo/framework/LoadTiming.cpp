@@ -37,10 +37,10 @@ static double				ltBucketMs[LT_NUM_BUCKETS];
 static int					ltBucketCount[LT_NUM_BUCKETS];
 static idLoadTimingScope *	ltCurrentScope = NULL;
 
-static double				ltImageMs = 0.0;			// all images since the reset
-static int					ltImageCount = 0;
-static double				ltImageMsAtPrint = 0.0;	// part of the above loaded before the print
-static int					ltImageCountAtPrint = 0;
+loadTimingImages_t			loadTimingRenderThreadImages;
+
+static loadTimingImages_t	ltImages;				// all images since the reset
+static loadTimingImages_t	ltImagesAtPrint;		// the part of them loaded before the summary
 static bool					ltImageReportPending = false;
 
 /*
@@ -66,10 +66,8 @@ void LoadTiming_Reset( void ) {
 		ltBucketMs[i] = 0.0;
 		ltBucketCount[i] = 0;
 	}
-	ltImageMs = 0.0;
-	ltImageCount = 0;
-	ltImageMsAtPrint = 0.0;
-	ltImageCountAtPrint = 0;
+	memset( &ltImages, 0, sizeof( ltImages ) );
+	memset( &ltImagesAtPrint, 0, sizeof( ltImagesAtPrint ) );
 	ltImageReportPending = false;
 }
 
@@ -93,6 +91,17 @@ loadTimingBucket_t LoadTiming_ModelBucket( const char *modelName ) {
 
 /*
 ================
+LoadTiming_PrintImages
+================
+*/
+static void LoadTiming_PrintImages( const char *label, const loadTimingImages_t &images ) {
+	const double mb = images.bytesRead / ( 1024.0 * 1024.0 );
+	common->Printf( "%s: %d in %.0f msec, %.1f MB read (%.1f MB/s)\n", label, images.count, images.ms, mb,
+		images.ms > 0.0 ? mb * 1000.0 / images.ms : 0.0 );
+}
+
+/*
+================
 LoadTiming_Print
 ================
 */
@@ -111,46 +120,54 @@ void LoadTiming_Print( double preMs, double procMs, double gameMs, double mediaM
 
 	common->Printf( "load phases (msec): pre=%.0f proc=%.0f game=%.0f media=%.0f settle=%.0f total=%.0f\n",
 		preMs, procMs, gameMs, mediaMs, settleMs, total );
-	common->Printf( "load work (msec): static models=%.0f (%d) md5=%.0f (%d) other models=%.0f (%d) collision=%.0f (%d) aas=%.0f (%d)\n",
+	common->Printf( "load models (msec): static=%.0f (%d) md5=%.0f (%d) other=%.0f (%d) collision=%.0f (%d) aas=%.0f (%d)\n",
 		ltBucketMs[LT_MODEL_STATIC], ltBucketCount[LT_MODEL_STATIC],
 		ltBucketMs[LT_MODEL_MD5], ltBucketCount[LT_MODEL_MD5],
 		ltBucketMs[LT_MODEL_OTHER], ltBucketCount[LT_MODEL_OTHER],
 		ltBucketMs[LT_CM_CONVERT], ltBucketCount[LT_CM_CONVERT],
 		ltBucketMs[LT_AAS], ltBucketCount[LT_AAS] );
-	common->Printf( "load work (msec): materials=%.0f (%d) other decls=%.0f (%d) sounds=%.0f (%d) other=%.0f\n",
+	common->Printf( "load decls (msec): material=%.0f (%d) modelDef+anims=%.0f (%d) entityDef=%.0f (%d) sound=%.0f (%d) particle+fx=%.0f (%d) other=%.0f (%d)\n",
 		ltBucketMs[LT_DECL_MATERIAL], ltBucketCount[LT_DECL_MATERIAL],
-		ltBucketMs[LT_DECL_OTHER], ltBucketCount[LT_DECL_OTHER],
+		ltBucketMs[LT_DECL_MODELDEF], ltBucketCount[LT_DECL_MODELDEF],
+		ltBucketMs[LT_DECL_ENTITYDEF], ltBucketCount[LT_DECL_ENTITYDEF],
+		ltBucketMs[LT_DECL_SOUND], ltBucketCount[LT_DECL_SOUND],
+		ltBucketMs[LT_DECL_PARTICLE_FX], ltBucketCount[LT_DECL_PARTICLE_FX],
+		ltBucketMs[LT_DECL_OTHER], ltBucketCount[LT_DECL_OTHER] );
+	common->Printf( "load work (msec): sound samples=%.0f (%d) loading screen=%.0f (%d frames) other=%.0f\n",
 		ltBucketMs[LT_SOUND_SAMPLE], ltBucketCount[LT_SOUND_SAMPLE],
-		other );
-	common->Printf( "load work (msec): loading screen=%.0f (%d frames), images on the render thread so far=%.0f (%d)\n",
 		ltBucketMs[LT_LOADING_SCREEN], ltBucketCount[LT_LOADING_SCREEN],
-		ltImageMs, ltImageCount );
+		other );
+	LoadTiming_PrintImages( "load images so far (render thread)", ltImages );
 
 	// images still queued are loaded by the render thread in the next frames
-	ltImageMsAtPrint = ltImageMs;
-	ltImageCountAtPrint = ltImageCount;
+	ltImagesAtPrint = ltImages;
 	ltImageReportPending = true;
 }
 
 /*
 ================
-LoadTiming_AddImageTime
+LoadTiming_AddImages
 
 Called by the main thread every frame. After a map load, the first frame that
 loads no images means the image queue is empty: report what was loaded after
 the load summary was printed.
 ================
 */
-void LoadTiming_AddImageTime( double ms, int count ) {
-	if ( count > 0 ) {
-		ltImageMs += ms;
-		ltImageCount += count;
+void LoadTiming_AddImages( const loadTimingImages_t &images ) {
+	if ( images.count > 0 ) {
+		ltImages.count += images.count;
+		ltImages.ms += images.ms;
+		ltImages.bytesRead += images.bytesRead;
 		return;
 	}
 	if ( ltImageReportPending ) {
 		ltImageReportPending = false;
-		common->Printf( "load images (msec): %.0f (%d) after the map load, %.0f (%d) in all\n",
-			ltImageMs - ltImageMsAtPrint, ltImageCount - ltImageCountAtPrint, ltImageMs, ltImageCount );
+		loadTimingImages_t after;
+		after.count = ltImages.count - ltImagesAtPrint.count;
+		after.ms = ltImages.ms - ltImagesAtPrint.ms;
+		after.bytesRead = ltImages.bytesRead - ltImagesAtPrint.bytesRead;
+		LoadTiming_PrintImages( "load images after the map load", after );
+		LoadTiming_PrintImages( "load images in all", ltImages );
 	}
 }
 
