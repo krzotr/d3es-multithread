@@ -393,12 +393,28 @@ const char *idUserInterfaceLocal::HandleEvent( const sysEvent_t *event, int _tim
 			const float realW = w;
 			const float realH = h;
 
+			// d3es: the GUI is drawn into the glConfig.vidWidth x vidHeight framebuffer, which
+			// framebuffer.cpp scales to the window; with r_framebufferMaintAspect it keeps its
+			// aspect ratio and only covers a centered part of the window, so use that part
+			const float fbAspectRatio = ( glConfig.vidWidth > 0 && glConfig.vidHeight > 0 )
+			                            ? float(glConfig.vidWidth) / float(glConfig.vidHeight) : w/h;
+			const bool usingFramebuffer = glConfig.vidWidth != glConfig.vidWidthReal
+			                              || glConfig.vidHeight != glConfig.vidHeightReal;
+			if ( usingFramebuffer && r_framebufferMaintAspect.GetBool() ) {
+				if ( fbAspectRatio < w/h ) {
+					w = h * fbAspectRatio;
+				} else {
+					h = w / fbAspectRatio;
+				}
+			}
+
 			if ( IsUserInterfaceScaledTo43(this) ) {
 				// in case we're scaling menus to 4:3, we need to take that into account
 				// when scaling the mouse events.
 				// no, we can't just call uiManagerLocal.dc.GetFixScaleForMenu() or sth like that,
 				// because when we're here dc.SetMenuScaleFix(true) is not active and it'd just return (1, 1)!
-				float aspectRatio = w/h;
+				// d3es: SetMenuScaleFix() decides based on the framebuffer size, not the window size
+				float aspectRatio = fbAspectRatio;
 				static const float virtualAspectRatio = float(VIRTUAL_WIDTH)/float(VIRTUAL_HEIGHT); // 4:3
 				if(aspectRatio > 1.4f) {
 					// widescreen (4:3 is 1.333 3:2 is 1.5, 16:10 is 1.6, 16:9 is 1.7778)

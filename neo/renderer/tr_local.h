@@ -854,6 +854,7 @@ extern idCVar r_windowResizable;		// DG: allow resizing and maximizing the windo
 
 extern idCVar r_framebufferWidth;       // When not zero, render to a framebuffer of this size
 extern idCVar r_framebufferHeight;      // When not zero, render to a framebuffer of this size
+extern idCVar r_framebufferMaintAspect; // keep the framebuffer's aspect ratio when scaling it to the window
 
 extern idCVar r_ignore;					// used for random debugging without defining new vars
 extern idCVar r_ignore2;				// used for random debugging without defining new vars
