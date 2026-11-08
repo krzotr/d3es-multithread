@@ -684,10 +684,6 @@ static void Pi_FrameLog( double mainWaitMs ) {
 		piFrameStats.draws, piFrameStats.shadowDraws );
 }
 
-// images the render thread loaded in its last frame task, for the level load timing
-static double	backendImageMs = 0.0;
-static int		backendImageCount = 0;
-
 void idRenderSystemLocal::BackendThreadTask()
 {
 	const double taskStart = Pi_NowMs();
@@ -703,16 +699,20 @@ void idRenderSystemLocal::BackendThreadTask()
 	}
 
 	// Load all images
+	// (the main thread is waiting meanwhile, so the read count is only the images' reads)
+	loadTimingImages_t &imageTiming = loadTimingRenderThreadImages;
+	memset( &imageTiming, 0, sizeof( imageTiming ) );
 	const double imagesStart = LoadTiming_Now();
-	int imagesLoaded = 0;
+	const int imagesReadCount = fileSystem->GetReadCount();
 	while( (img = globalImages->GetNextAllocImage()) != NULL )
 	{
 		img->ActuallyLoadImage( false );
-		imagesLoaded++;
+		imageTiming.count++;
 	}
-	// read by the main thread once it has waited for the images (RenderCommands)
-	backendImageMs = imagesLoaded ? LoadTiming_Now() - imagesStart : 0.0;
-	backendImageCount = imagesLoaded;
+	if ( imageTiming.count > 0 ) {
+		imageTiming.ms = LoadTiming_Now() - imagesStart;
+		imageTiming.bytesRead = fileSystem->GetReadCount() - imagesReadCount;
+	}
 
 
 	if( useSpinLock )
@@ -865,7 +865,8 @@ void idRenderSystemLocal::RenderCommands(renderCrop_t *pc, byte *pix)
 	{
 		Sys_WaitForEvent(TRIGGER_EVENT_IMAGES_PROCESSES);
 	}
-	LoadTiming_AddImageTime( backendImageMs, backendImageCount );
+	// the render thread is done with the images of this frame task
+	LoadTiming_AddImages( loadTimingRenderThreadImages );
 
 	// If we are waiting for pixel data, make sure we wait for the backend to finish
 	if(pix)

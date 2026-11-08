@@ -2179,7 +2179,17 @@ void idDeclLocal::ParseLocal( void ) {
 	bool generatedDefaultText = false;
 
 	// decls this one parses on the way (a material's tables, a sound shader's samples) are counted apart
-	idLoadTimingScope loadTiming( type == DECL_MATERIAL ? LT_DECL_MATERIAL : LT_DECL_OTHER );
+	loadTimingBucket_t loadTimingBucket;
+	switch ( type ) {
+		case DECL_MATERIAL:		loadTimingBucket = LT_DECL_MATERIAL; break;
+		case DECL_MODELDEF:		loadTimingBucket = LT_DECL_MODELDEF; break;
+		case DECL_ENTITYDEF:	loadTimingBucket = LT_DECL_ENTITYDEF; break;
+		case DECL_SOUND:		loadTimingBucket = LT_DECL_SOUND; break;
+		case DECL_PARTICLE:
+		case DECL_FX:			loadTimingBucket = LT_DECL_PARTICLE_FX; break;
+		default:				loadTimingBucket = LT_DECL_OTHER; break;
+	}
+	idLoadTimingScope loadTiming( loadTimingBucket );
 
 	AllocateSelf();
 
