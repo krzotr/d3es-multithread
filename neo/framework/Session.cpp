@@ -56,8 +56,6 @@ idCVar	idSessionLocal::com_aviDemoSamples( "com_aviDemoSamples", "16", CVAR_SYST
 idCVar	idSessionLocal::com_aviDemoWidth( "com_aviDemoWidth", "256", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_aviDemoHeight( "com_aviDemoHeight", "256", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_aviDemoTics( "com_aviDemoTics", "2", CVAR_SYSTEM | CVAR_INTEGER, "", 1, 60 );
-static idCVar com_loadingScreenTime( "com_loadingScreenTime", "0", CVAR_SYSTEM | CVAR_INTEGER | CVAR_ARCHIVE,
-	"msec the loading screen is shown before a map starts loading (Doom 3: 1000)", 0, 5000 );
 idCVar	idSessionLocal::com_wipeSeconds( "com_wipeSeconds", "1", CVAR_SYSTEM, "" );
 idCVar	idSessionLocal::com_guid( "com_guid", "", CVAR_SYSTEM | CVAR_ARCHIVE | CVAR_ROM, "" );
 
@@ -551,12 +549,8 @@ void idSessionLocal::ShowLoadingGui() {
 	// introduced in D3XP code. don't think it actually fixes anything, but doesn't hurt either
 #if 1
 	// Try and prevent the while loop from being skipped over (long hitch on the main thread?)
-	// The loading screen was shown for a whole second before every map load; on the
-	// handheld that is a noticeable part of a reload, so it is now com_loadingScreenTime
-	// (1000 = as before). A few frames still run so the loading screen reaches the
-	// display: the multithreaded renderer draws a frame behind the main thread.
-	int stop = Sys_Milliseconds() + Max( 0, com_loadingScreenTime.GetInteger() );
-	int force = 3;
+	int stop = Sys_Milliseconds() + 1000;
+	int force = 10;
 	while ( Sys_Milliseconds() < stop || force-- > 0 ) {
 		Com_UpdateFrameTime(); // DG: put updating com_frameTime into a function
 		session->Frame();
