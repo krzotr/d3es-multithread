@@ -54,13 +54,22 @@ int idImage::BitsForInternalFormat( int internalFormat ) const {
 	case 2:
 	case 3:
 	case 4:
+	case GL_RGBA:
 		return 32;
+	case GL_RGB:
+		return 24;
 	case GL_RGBA4:
 		return 16;
 	case GL_RGB5_A1:
 		return 16;
+	case GL_ETC1_RGB8_OES:
+		return 4;
+	case 0:
+		return 0;
 	default:
-		common->Error( "R_BitsForInternalFormat: BAD FORMAT:%i", internalFormat );
+		// only used for statistics (listImages, memory reports), so don't
+		// drop the game with common->Error() over an unknown format
+		common->Warning( "R_BitsForInternalFormat: BAD FORMAT:%i", internalFormat );
 	}
 	return 0;
 }
@@ -565,7 +574,15 @@ static void EtxCompressLevel( const byte *rgba, int width, int height, bool opaq
 	}
 }
 
-void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
+/*
+================
+myglTexImage2D
+
+Returns the format the level is really stored in on the GPU (ETC1 or
+RGBA4444 with r_useETC1), which is what the memory statistics need.
+================
+*/
+GLint myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
 	static int opaque = 0;
 
 	// LOGI("myglTexImage2D, name = %s", cachefname );
@@ -580,13 +597,16 @@ void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalf
 		// been loaded and processed. With r_useETC1cache, GenerateImage() uses
 		// GenerateETCCacheLevels() and the single-file .etx cache instead, which
 		// is read before the source image is touched (idImage::LoadETCCache).
-		if (opaque)
+		if (opaque) {
 			etc1_compress_tex_image(0,target, level, format, width, height, border, format, type, pixels);
-		else
-			rgba4444_convert_tex_image(0,target, level, format, width, height, border, format, type, pixels);
-	} else {
-		qglTexImage2D(target,level,internalformat,width,height,border,format,type,pixels);
+			return GL_ETC1_RGB8_OES;
+		}
+		rgba4444_convert_tex_image(0,target, level, format, width, height, border, format, type, pixels);
+		return GL_RGBA4;
 	}
+
+	qglTexImage2D(target,level,internalformat,width,height,border,format,type,pixels);
+	return internalformat;
 }
 
 //end
@@ -790,7 +810,10 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	} else
 		fptr=0;
 
-	myglTexImage2D(fptr,GL_TEXTURE_2D, 0, internalFormat, scaled_width, scaled_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledBuffer);
+	// internalFormat must stay GL_RGBA for the remaining glTexImage2D calls
+	// (GLES needs internalformat == format), so only record the real storage
+	// format once all levels are uploaded
+	const GLint storageFormat = myglTexImage2D(fptr,GL_TEXTURE_2D, 0, internalFormat, scaled_width, scaled_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledBuffer);
 
 	// create and upload the mip map levels, which we do in all cases, even if we don't think they are needed
 	int		miplevel;
@@ -838,6 +861,8 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	if ( scaledBuffer != 0 ) {
 		R_StaticFree( scaledBuffer );
 	}
+
+	internalFormat = storageFormat;
 
 	SetImageFilterAndRepeat();
 
@@ -1205,6 +1230,7 @@ void idImage::GenerateETCCacheLevels( const byte *pic, int width, int height,
 	uploadWidth = scaledWidth;
 	uploadHeight = scaledHeight;
 	type = TT_2D;
+	internalFormat = opaque ? GL_ETC1_RGB8_OES : GL_RGBA4;
 
 	SetImageFilterAndRepeat();
 
@@ -1464,7 +1490,7 @@ bool idImage::LoadETCFile( const char *filename ) {
 	free( data );
 
 	type = TT_2D;
-	internalFormat = GL_RGBA;
+	internalFormat = ( header.format == ETX_ETC1 ) ? GL_ETC1_RGB8_OES : GL_RGBA4;
 	depth = (textureDepth_t)resultDepth;
 	timestamp = sourceTime;
 
@@ -1945,13 +1971,20 @@ void idImage::Print() const {
 	case 2:
 	case 3:
 	case 4:
+	case GL_RGBA:
 		common->Printf( "RGBA  " );
+		break;
+	case GL_RGB:
+		common->Printf( "RGB   " );
 		break;
 	case GL_RGBA4:
 		common->Printf( "RGBA4 " );
 		break;
 	case GL_RGB5_A1:
 		common->Printf( "RGB5_A1  " );
+		break;
+	case GL_ETC1_RGB8_OES:
+		common->Printf( "ETC1  " );
 		break;
 	case 0:
 		common->Printf( "      " );
