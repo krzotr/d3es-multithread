@@ -1301,6 +1301,51 @@ ETCCacheFileName). With "developer 1" the reason a file is rejected is
 printed to the console.
 ================
 */
+/*
+================
+EtxTexStorage
+
+glTexStorage2D (OpenGL ES 3.0) for the .etx upload, see LoadETCFile.
+
+Uploading the mip levels one by one with glCompressedTexImage2D / glTexImage2D
+leaves the driver guessing the final size of the texture at every level. With
+the storage of the whole chain allocated first, the levels only fill it in.
+r_etcTexStorage 0 goes back to the level by level upload, to compare.
+
+The GLES2 headers don't declare it, so it is looked up by name, and only used
+when the context is OpenGL ES 3 or later. Render thread only.
+================
+*/
+static idCVar r_etcTexStorage( "r_etcTexStorage", "1", CVAR_RENDERER | CVAR_BOOL,
+	"allocate the whole mip chain with glTexStorage2D before uploading an .etx image (needs OpenGL ES 3)" );
+
+#ifndef GL_COMPRESSED_RGB8_ETC2
+#define GL_COMPRESSED_RGB8_ETC2		0x9274
+#endif
+
+typedef void ( GL_APIENTRYP etxTexStorage2D_t )( GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height );
+static etxTexStorage2D_t	etxTexStorage2D = NULL;
+static bool					etxTexStorageChecked = false;
+static bool					etxTexStorageFailed = false;
+
+static bool EtxUseTexStorage( void ) {
+	if ( !r_etcTexStorage.GetBool() || etxTexStorageFailed ) {
+		return false;
+	}
+	if ( !etxTexStorageChecked ) {
+		etxTexStorageChecked = true;
+		int major = 0;
+		if ( glConfig.version_string != NULL ) {
+			sscanf( glConfig.version_string, "OpenGL ES %d", &major );
+		}
+		if ( major >= 3 ) {
+			etxTexStorage2D = (etxTexStorage2D_t)GLimp_ExtensionPointer( "glTexStorage2D" );
+		}
+		common->Printf( "ETC cache: glTexStorage2D %s\n", etxTexStorage2D != NULL ? "used" : "not available (needs OpenGL ES 3)" );
+	}
+	return etxTexStorage2D != NULL;
+}
+
 // the parts of the last successful LoadETCFile, for the level load timing
 static double	etxLastTimestampMs;
 static double	etxLastReadMs;
@@ -1464,13 +1509,43 @@ bool idImage::LoadETCFile( const char *filename ) {
 	int h = Max( header.height >> startLevel, 1 );
 	uploadWidth = w;
 	uploadHeight = h;
+
+	// allocate the whole chain first (see EtxTexStorage). ETC1 data is valid ETC2 RGB8
+	// data, and unlike GL_ETC1_RGB8_OES that format works with glTexStorage2D and
+	// glCompressedTexSubImage2D.
+	bool useStorage = EtxUseTexStorage();
+	if ( useStorage ) {
+		// clear older errors, so the check below is about this call only
+		for ( int i = 0; i < 8 && qglGetError() != GL_NO_ERROR; i++ ) {
+		}
+		etxTexStorage2D( GL_TEXTURE_2D, header.numLevels - startLevel,
+			header.format == ETX_ETC1 ? GL_COMPRESSED_RGB8_ETC2 : GL_RGBA4, w, h );
+		const GLenum error = qglGetError();
+		if ( error != GL_NO_ERROR ) {
+			// never again, and this image the old way, on a fresh texture (a failed
+			// glTexStorage2D may still have made it immutable)
+			common->Printf( "ETC cache: glTexStorage2D failed (0x%x), uploading level by level\n", error );
+			etxTexStorageFailed = true;
+			useStorage = false;
+			qglDeleteTextures( 1, &texnum );
+			qglGenTextures( 1, &texnum );
+			Bind();
+		}
+	}
+
 	for ( int level = startLevel; level < header.numLevels; level++ ) {
 		int size;
 		memcpy( &size, data + offset, 4 );
 		// malloc-aligned buffer, every level starts at a multiple of 4
 		const void *levelData = data + offset + 4;
 		const int glLevel = level - startLevel;
-		if ( header.format == ETX_ETC1 ) {
+		if ( useStorage ) {
+			if ( header.format == ETX_ETC1 ) {
+				qglCompressedTexSubImage2D( GL_TEXTURE_2D, glLevel, 0, 0, w, h, GL_COMPRESSED_RGB8_ETC2, size, levelData );
+			} else {
+				qglTexSubImage2D( GL_TEXTURE_2D, glLevel, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, levelData );
+			}
+		} else if ( header.format == ETX_ETC1 ) {
 			qglCompressedTexImage2D( GL_TEXTURE_2D, glLevel, GL_ETC1_RGB8_OES, w, h, 0, size, levelData );
 		} else {
 			qglTexImage2D( GL_TEXTURE_2D, glLevel, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, levelData );
