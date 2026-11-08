@@ -54,13 +54,22 @@ int idImage::BitsForInternalFormat( int internalFormat ) const {
 	case 2:
 	case 3:
 	case 4:
+	case GL_RGBA:
 		return 32;
+	case GL_RGB:
+		return 24;
 	case GL_RGBA4:
 		return 16;
 	case GL_RGB5_A1:
 		return 16;
+	case GL_ETC1_RGB8_OES:
+		return 4;
+	case 0:
+		return 0;
 	default:
-		common->Error( "R_BitsForInternalFormat: BAD FORMAT:%i", internalFormat );
+		// only used for statistics (listImages, memory reports), so don't
+		// drop the game with common->Error() over an unknown format
+		common->Warning( "R_BitsForInternalFormat: BAD FORMAT:%i", internalFormat );
 	}
 	return 0;
 }
@@ -359,7 +368,7 @@ int etcavail(char* cachefname) {
 	return (r_useETC1Cache.GetBool())&&(r_useETC1.GetBool())&&(cachefname!=0)&&(fileSystem->ReadFile(cachefname,0,0)!=-1);
 }
 
-int uploadetc(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type) {
+int uploadetc(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, GLint *storageFormat) {
 	char* tmp;
 	int failed=0;
 
@@ -374,12 +383,14 @@ int uploadetc(char* cachefname,GLenum target, GLint level, GLint internalformat,
 	if (tmp[0]==0) {
 		if (sz==etc1_data_size(width,height)+1) {
 			qglCompressedTexImage2D(target,level,GL_ETC1_RGB8_OES,width,height,0,etc1_data_size(width,height),tmp + 1);
+			*storageFormat = GL_ETC1_RGB8_OES;
 		} else {
 			failed=1;
 		}
 	} else {
 		if (sz==width*height*2+1) {
 			qglTexImage2D(target,level,format,width,height,border,format,GL_UNSIGNED_SHORT_4_4_4_4,tmp + 1);
+			*storageFormat = GL_RGBA4;
 		} else {
 			failed=1;
 		}
@@ -390,8 +401,17 @@ int uploadetc(char* cachefname,GLenum target, GLint level, GLint internalformat,
 	return failed;
 }
 
-void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
+/*
+================
+myglTexImage2D
+
+Returns the format the level is really stored in on the GPU (ETC1 or
+RGBA4444 with r_useETC1), which is what the memory statistics need.
+================
+*/
+GLint myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const GLvoid *pixels) {
 	static int opaque = 0;
+	GLint storageFormat = internalformat;
 
 	// LOGI("myglTexImage2D, name = %s", cachefname );
 
@@ -403,21 +423,21 @@ void myglTexImage2D(char* cachefname,GLenum target, GLint level, GLint internalf
 		if (!r_useETC1Cache.GetBool())
 			cachefname=0;
 
-		if( uploadetc(cachefname, target, level, internalformat, width, height, border, format, type ) != 0 )
+		if( uploadetc(cachefname, target, level, internalformat, width, height, border, format, type, &storageFormat ) != 0 )
 		{
-			if (opaque)
+			if (opaque) {
 				etc1_compress_tex_image(cachefname,target, level, format, width, height, border, format, type, pixels);
-			else
+				storageFormat = GL_ETC1_RGB8_OES;
+			} else {
 				rgba4444_convert_tex_image(cachefname,target, level, format, width, height, border, format, type, pixels);
-
-		}
-		else
-		{
-
+				storageFormat = GL_RGBA4;
+			}
 		}
 	} else {
 		qglTexImage2D(target,level,internalformat,width,height,border,format,type,pixels);
 	}
+
+	return storageFormat;
 }
 
 //end
@@ -610,7 +630,10 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	} else
 		fptr=0;
 
-	myglTexImage2D(fptr,GL_TEXTURE_2D, 0, internalFormat, scaled_width, scaled_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledBuffer);
+	// internalFormat must stay GL_RGBA for the remaining glTexImage2D calls
+	// (GLES needs internalformat == format), so only record the real storage
+	// format once all levels are uploaded
+	const GLint storageFormat = myglTexImage2D(fptr,GL_TEXTURE_2D, 0, internalFormat, scaled_width, scaled_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scaledBuffer);
 
 	// create and upload the mip map levels, which we do in all cases, even if we don't think they are needed
 	int		miplevel;
@@ -658,6 +681,8 @@ void idImage::GenerateImage( const byte *pic, int width, int height,
 	if ( scaledBuffer != 0 ) {
 		R_StaticFree( scaledBuffer );
 	}
+
+	internalFormat = storageFormat;
 
 	SetImageFilterAndRepeat();
 
@@ -1282,13 +1307,20 @@ void idImage::Print() const {
 	case 2:
 	case 3:
 	case 4:
+	case GL_RGBA:
 		common->Printf( "RGBA  " );
+		break;
+	case GL_RGB:
+		common->Printf( "RGB   " );
 		break;
 	case GL_RGBA4:
 		common->Printf( "RGBA4 " );
 		break;
 	case GL_RGB5_A1:
 		common->Printf( "RGB5_A1  " );
+		break;
+	case GL_ETC1_RGB8_OES:
+		common->Printf( "ETC1  " );
 		break;
 	case 0:
 		common->Printf( "      " );
