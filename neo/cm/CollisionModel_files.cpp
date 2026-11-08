@@ -471,6 +471,11 @@ void idCollisionModelManagerLocal::ParseBrushes( idLexer *src, cm_model_t *model
 		}
 		b->checkcount = 0;
 		b->primitiveNum = 0;
+		// a .cm brush names no material (a brush built from a .map does, CM_CreateBrush), and
+		// the block it comes from is not cleared: id left it unset, so a trace starting inside the
+		// brush (TestTrmVertsInBrush, the start-in-solid test) reported a garbage contact
+		// material, which the game code reads (trace.c.material)
+		b->material = NULL;
 		// filter brush into tree
 		R_FilterBrushIntoTree( model, model->node, NULL, b );
 	}
