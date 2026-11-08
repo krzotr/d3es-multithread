@@ -1799,17 +1799,18 @@ void idSoundWorldLocal::AddChannelContribution( idSoundEmitterLocal *sound, idSo
 	//     I guess this happens because the loud sounds mixed together are too loud so
 	//     OpenAL just makes *everything* quiter or sth like that.
 	//     See also https://github.com/dhewm/dhewm3/issues/179
+	if( soundSystemLocal.s_scaleDownAndClamp.GetBool() ) {
+		// First clamp it to 1.0 - that's done anyway when setting AL_GAIN below,
+		// for consistency it must be done before scaling, because many player-weapon
+		// sounds have a too high volume defined and only sound right (relative to
+		// other weapons) when clamped
+		// see https://github.com/dhewm/dhewm3/issues/326#issuecomment-1366833004
+		if(volume > 1.0f) {
+			volume = 1.0f;
+		}
 
-	// First clamp it to 1.0 - that's done anyway when setting AL_GAIN below,
-	// for consistency it must be done before scaling, because many player-weapon
-	// sounds have a too high volume defined and only sound right (relative to
-	// other weapons) when clamped
-	// see https://github.com/dhewm/dhewm3/issues/326#issuecomment-1366833004
-	if(volume > 1.0f) {
-		volume = 1.0f;
+		volume *= 0.333f; // (0.333 worked fine, 0.5 didn't)
 	}
-
-	volume *= 0.333f; // (0.333 worked fine, 0.5 didn't)
 
 	// global volume scale - DG: now done after clamping to 1.0, so reducing the
 	// global volume doesn't cause the different weapon volume issues described above
@@ -2147,10 +2148,13 @@ float idSoundWorldLocal::FindAmplitude( idSoundEmitterLocal *sound, const int lo
 				sourceBuffer[j] = j & 1 ? 32767.0f : -32767.0f;
 			}
 		} else {
-			int offset = (localTime - localTriggerTimes);	// offset in samples
-			int size = ( looping ? chan->soundShader->entries[0]->LengthIn44kHzSamples() : chan->leadinSample->LengthIn44kHzSamples() );
-			short *amplitudeData = (short *)( looping ? chan->soundShader->entries[0]->amplitudeData : chan->leadinSample->amplitudeData );
+			idSoundSample* sample = looping ? chan->soundShader->entries[0] : chan->leadinSample;
+			if ( sample == NULL ) // DG: this happens if sound is disabled (s_noSound 1)
+				continue;
 
+			int offset = (localTime - localTriggerTimes);	// offset in samples
+			int size = sample->LengthIn44kHzSamples();
+			short *amplitudeData = (short *)( sample->amplitudeData );
 			if ( amplitudeData ) {
 				// when the amplitudeData is present use that fill a dummy sourceBuffer
 				// this is to allow for amplitude based effect on hardware audio solutions

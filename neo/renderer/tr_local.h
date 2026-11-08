@@ -110,6 +110,7 @@ SURFACES
 
 // drawSurf_t are always allocated and freed every frame, they are never cached
 static const int	DSF_VIEW_INSIDE_SHADOW	= 1;
+static const int	DSF_SOFT_PARTICLE		= 2; // #3878 - soft particles
 
 typedef struct drawSurf_s {
 	const srfTriangles_t	*geoFrontEnd;
@@ -130,6 +131,7 @@ typedef struct drawSurf_s {
 	int						numShadowIndexesNoFrontCaps;	// shadow volumes with front caps omitted
 	int						numShadowIndexesNoCaps;			// shadow volumes with the front and rear caps omitted
 	int						shadowCapPlaneBits;		// bits 0-5 are set when that plane of the interacting light has triangles
+	float					particle_radius;	// The radius of individual quads for soft particles #3878
 } drawSurf_t;
 
 
@@ -337,6 +339,7 @@ typedef struct viewLight_s {
 	const idMaterial *		lightShader;				// light shader used by backend
 	const float	*			shaderRegisters;			// shader registers used by backend
 	idImage *				falloffImage;				// falloff image used by backend
+	bool					noSpecular;					// lightDef->parms.noSpecular, copied for the backend thread
 
 	const struct drawSurf_s	*globalShadows;				// shadow everything
 	const struct drawSurf_s	*localInteractions;			// don't get local shadows
@@ -828,6 +831,10 @@ public:
 	//     so they can be reset in EndFrame() (Editors tend to mess up the viewport by using BeginFrame())
 	int						origWidth;
 	int						origHeight;
+
+	// DG: taken from the current map's worldspawn ("allow_nospecular")
+	//     true if (unlike in Vanilla Doom3) the "nospecular" parm of a light should be respected
+	bool					allowNoSpecular;
 };
 
 extern backEndState_t		backEnd;
@@ -843,9 +850,11 @@ extern idCVar r_displayRefresh;			// optional display refresh rate option for vi
 extern idCVar r_fullscreen;				// 0 = windowed, 1 = full screen
 extern idCVar r_fullscreenDesktop;		// 0: 'real' fullscreen mode 1: keep resolution 'desktop' fullscreen mode
 extern idCVar r_multiSamples;			// number of antialiasing samples
+extern idCVar r_windowResizable;		// DG: allow resizing and maximizing the window
 
 extern idCVar r_framebufferWidth;       // When not zero, render to a framebuffer of this size
 extern idCVar r_framebufferHeight;      // When not zero, render to a framebuffer of this size
+extern idCVar r_framebufferMaintAspect; // keep the framebuffer's aspect ratio when scaling it to the window
 
 extern idCVar r_ignore;					// used for random debugging without defining new vars
 extern idCVar r_ignore2;				// used for random debugging without defining new vars
@@ -913,6 +922,8 @@ extern idCVar r_useVertexBuffers;		// if 0, don't use ARB_vertex_buffer_object f
 extern idCVar r_useIndexBuffers;		// if 0, don't use ARB_vertex_buffer_object for indexes
 extern idCVar r_useEntityCallbacks;		// if 0, issue the callback immediately at update time, rather than defering
 extern idCVar r_lightAllBackFaces;		// light all the back faces, even when they would be shadowed
+
+extern idCVar r_supportNoSpecular;		// support nospecular parm of lights
 
 extern idCVar r_skipPostProcess;		// skip all post-process renderings
 extern idCVar r_skipSuppress;			// ignore the per-view suppressions
@@ -1011,6 +1022,10 @@ extern idCVar r_noLight;				// no lighting
 extern idCVar r_useETC1;				// ETC1 compression
 extern idCVar r_useETC1Cache;			// use ETC1 cache
 extern idCVar r_maxFps;
+
+extern idCVar r_glDebugContext; // DG: use debug context to call logging callbacks on GL errors
+extern idCVar r_enableDepthCapture; // DG: disable capturing depth buffer, used for soft particles
+extern idCVar r_useSoftParticles;
 /*
 ====================================================================
 
@@ -1086,8 +1101,9 @@ typedef struct {
 	int			width;
 	int			height;
 	bool		fullScreen;
+	bool		fullScreenDesktop;
 	bool		stereo;
-	int			displayHz;
+	int			displayHz; // TODO: SDL3 uses float
 	int			multiSamples;
 } glimpParms_t;
 
@@ -1133,8 +1149,18 @@ void		GLimp_DeactivateContext( void );
 const int GRAB_GRABMOUSE	= (1 << 0);
 const int GRAB_HIDECURSOR	= (1 << 1);
 const int GRAB_RELATIVEMOUSE = (1 << 2);
+const int GRAB_ENABLETEXTINPUT = (1 << 3); // to explicitly enable/disable textinput in SDL2/3
 
 void GLimp_GrabInput(int flags);
+
+bool GLimp_SetSwapInterval( int swapInterval );
+int GLimp_GetSwapInterval();
+bool GLimp_SetWindowResizable( bool enableResizable );
+void GLimp_UpdateWindowSize();
+
+glimpParms_t GLimp_GetCurState();
+float GLimp_GetDisplayRefresh();
+
 /*
 ====================================================================
 
@@ -1192,7 +1218,7 @@ viewEntity_t *R_SetEntityDefViewEntity( idRenderEntityLocal *def );
 viewLight_t *R_SetLightDefViewLight( idRenderLightLocal *def );
 
 void R_AddDrawSurf( const srfTriangles_t *tri, const viewEntity_t *space, const renderEntity_t *renderEntity,
-					const idMaterial *shader, const idScreenRect &scissor );
+					const idMaterial *shader, const idScreenRect &scissor, const float soft_particle_radius = -1.0f ); // soft particles in #3878
 
 void R_LinkLightSurf( const drawSurf_t **link, const srfTriangles_t *tri, const viewEntity_t *space,
 				   const idRenderLightLocal *light, const idMaterial *shader, const idScreenRect &scissor, bool viewInsideShadow );
@@ -1413,6 +1439,8 @@ void				R_ResizeStaticTriSurfShadowVerts( srfTriangles_t *tri, int numVerts );
 void				R_ReferenceStaticTriSurfVerts( srfTriangles_t *tri, const srfTriangles_t *reference );
 void				R_ReferenceStaticTriSurfIndexes( srfTriangles_t *tri, const srfTriangles_t *reference );
 void				R_FreeStaticTriSurfSilIndexes( srfTriangles_t *tri );
+void				R_FreeStaticTriSurfSilEdges( srfTriangles_t *tri );
+void				R_FreeStaticTriSurfIndexes( srfTriangles_t *tri );
 void				R_FreeStaticTriSurf( srfTriangles_t *tri );
 void				R_FreeStaticTriSurfVertexCaches( srfTriangles_t *tri );
 void				R_ReallyFreeStaticTriSurf( srfTriangles_t *tri );
@@ -1422,6 +1450,7 @@ int					R_TriSurfMemory( const srfTriangles_t *tri );
 void				R_BoundTriSurf( srfTriangles_t *tri );
 void				R_RemoveDuplicatedTriangles( srfTriangles_t *tri );
 void				R_CreateSilIndexes( srfTriangles_t *tri );
+void				R_IdentifySilEdges( srfTriangles_t *tri, bool omitCoplanarEdges );
 void				R_RemoveDegenerateTriangles( srfTriangles_t *tri );
 void				R_RemoveUnusedVerts( srfTriangles_t *tri );
 void				R_RangeCheckIndexes( const srfTriangles_t *tri );

@@ -38,6 +38,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "renderer/tr_local.h"
 
+#include <unistd.h>	// usleep(), used to come in through zlib.h before dhewm3 switched to miniz
+
 idRenderSystemLocal	tr;
 idRenderSystem	*renderSystem = &tr;
 
@@ -240,6 +242,16 @@ static void R_CheckCvars( void ) {
 		r_gamma.ClearModified();
 		r_brightness.ClearModified();
 		R_SetColorMappings();
+	}
+
+	if ( r_swapInterval.IsModified() ) {
+		GLimp_SetSwapInterval( r_swapInterval.GetInteger() );
+		r_swapInterval.ClearModified();
+	}
+
+	if ( r_windowResizable.IsModified() ) {
+		GLimp_SetWindowResizable( r_windowResizable.GetBool() );
+		r_windowResizable.ClearModified();
 	}
 }
 

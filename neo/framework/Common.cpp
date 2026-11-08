@@ -26,7 +26,12 @@ If you have questions concerning this license or the applicable additional terms
 ===========================================================================
 */
 
-#include <SDL.h>
+#include "sys/sys_sdl.h"
+
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+  // DG: compat with SDL2
+  #define SDL_setenv SDL_setenv_unsafe
+#endif
 
 #include "sys/platform.h"
 #include "idlib/containers/HashTable.h"
@@ -46,9 +51,12 @@ If you have questions concerning this license or the applicable additional terms
 #include "renderer/Model.h"
 #include "renderer/ModelManager.h"
 #include "renderer/RenderSystem.h"
+#include "renderer/tr_local.h" // to get swapinterval and refreshrate
 #include "tools/compilers/compiler_public.h"
 #include "tools/compilers/aas/AASFileManager.h"
 #include "tools/edit_public.h"
+
+#include "sys/sys_imgui.h"
 
 #include "framework/Common.h"
 
@@ -57,6 +65,9 @@ If you have questions concerning this license or the applicable additional terms
 
 #define	MAX_PRINT_MSG_SIZE	4096
 #define MAX_WARNING_LIST	256
+
+// DG: implemented in Dhewm3SettingsMenu.cpp (the only Com_*_f() function not implemented in this file)
+extern void Com_Dhewm3Settings_f( const idCmdArgs &args );
 
 typedef enum {
 	ERP_NONE,
@@ -72,7 +83,7 @@ typedef enum {
 #endif
 
 struct version_s {
-			version_s( void ) { sprintf( string, "%s.%d%s %s-%s %s %s", ENGINE_VERSION, BUILD_NUMBER, BUILD_DEBUG, BUILD_OS, BUILD_CPU, ID__DATE__, ID__TIME__ ); }
+			version_s( void ) { sprintf( string, "%s.%d%s %s-%s %s %s", ENGINE_VERSION, BUILD_NUMBER, BUILD_DEBUG, BUILD_OS, D3_ARCH, ID__DATE__, ID__TIME__ ); }
 	char	string[256];
 } version;
 
@@ -82,14 +93,13 @@ idCVar com_machineSpec( "com_machineSpec", "-1", CVAR_INTEGER | CVAR_ARCHIVE | C
 idCVar com_purgeAll( "com_purgeAll", "0", CVAR_BOOL | CVAR_ARCHIVE | CVAR_SYSTEM, "purge everything between level loads" );
 idCVar com_memoryMarker( "com_memoryMarker", "-1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_INIT, "used as a marker for memory stats" );
 idCVar com_preciseTic( "com_preciseTic", "1", CVAR_BOOL|CVAR_SYSTEM, "run one game tick every async thread update" );
-idCVar com_asyncInput( "com_asyncInput", "0", CVAR_BOOL|CVAR_SYSTEM, "sample input from the async thread" );
 #define ASYNCSOUND_INFO "0: mix sound inline, 1 or 3: async update every 16ms 2: async update about every 100ms (original behavior)"
 idCVar com_asyncSound( "com_asyncSound", "1", CVAR_INTEGER|CVAR_SYSTEM, ASYNCSOUND_INFO, 0, 3 );
 idCVar com_forceGenericSIMD( "com_forceGenericSIMD", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "force generic platform independent SIMD" );
 idCVar com_developer( "developer", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "developer mode" );
 idCVar com_allowConsole( "com_allowConsole", "0", CVAR_BOOL | CVAR_SYSTEM | CVAR_NOCHEAT, "allow toggling console with the tilde key" );
 idCVar com_speeds( "com_speeds", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show engine timings" );
-idCVar com_showFPS( "com_showFPS", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_ARCHIVE|CVAR_NOCHEAT, "show frames rendered per second" );
+idCVar com_showFPS( "com_showFPS", "0", CVAR_INTEGER|CVAR_SYSTEM|CVAR_ARCHIVE|CVAR_NOCHEAT, "show frames rendered per second" );
 idCVar com_showMemoryUsage( "com_showMemoryUsage", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show total and per frame memory usage" );
 idCVar com_showAsyncStats( "com_showAsyncStats", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show async network stats" );
 idCVar com_showSoundDecoders( "com_showSoundDecoders", "0", CVAR_BOOL|CVAR_SYSTEM|CVAR_NOCHEAT, "show sound decoders" );
@@ -104,13 +114,21 @@ idCVar com_dbgServerAdr( "com_dbgServerAdr", "localhost", CVAR_SYSTEM | CVAR_ARC
 
 idCVar com_product_lang_ext( "com_product_lang_ext", "1", CVAR_INTEGER | CVAR_SYSTEM | CVAR_ARCHIVE, "Extension to use when creating language files." );
 
+// in the high-fps branch, the next three values will be set based on com_gameHz
+// here (in the old 60fps-only code) they're const and just to reduce difference to the other branch
+//const int    com_gameHzVal = 60;
+//const int    com_gameFrameLengthMS = 16; // length of one frame in msec, 1000 / com_gameHz
+const double  com_preciseFrameLengthMS = 1000.0 / 60.0;
+
+double com_preciseFrameTimeMS = 0; // like com_frameTime but as double: time (since start) for the current frame in milliseconds
+
 // com_speeds times
 int				time_gameFrame;
 int				time_gameDraw;
 int				time_frontend;			// renderSystem frontend time
 int				time_backend;			// renderSystem backend time
 
-int				com_frameTime;			// time for the current frame in milliseconds
+int				com_frameTime;			// time (since start) for the current frame in milliseconds
 int				com_frameNumber;		// variable frame number
 volatile int	com_ticNumber;			// 60 hz tics
 int				com_editors;			// currently opened editor(s)
@@ -207,7 +225,6 @@ private:
 	void						CheckToolMode( void );
 	void						WriteConfiguration( void );
 	void						DumpWarnings( void );
-	void						SingleAsyncTic( void );
 	void						LoadGameDLL( void );
 	void						LoadGameDLLbyName( const char *dll, idStr& s );
 	void						UnloadGameDLL( void );
@@ -236,11 +253,69 @@ private:
 	idCompressor *				config_compressor;
 #endif
 
-	SDL_TimerID					async_timer;
+	static int					AsyncThread(void* arg);
+	xthreadInfo					asyncThread;
+	volatile bool				runAsyncThread;
 };
 
 idCommonLocal	commonLocal;
 idCommon *		common = &commonLocal;
+
+static double nextTicTime = 0.0;
+
+// DG: updates the tic number based on the (real) time expired since it has last been updated
+void Com_UpdateTicNumber() {
+	D3P_CPUSampleFn();
+	double now = Sys_MillisecondsPrecise();
+	double timeDiff = now - nextTicTime + 0.1; // 0.1 ms tolerance in case we're just a little early
+	if ( timeDiff >= 0.0) {
+		if ( nextTicTime == 0.0 ) {
+			nextTicTime = now + com_preciseFrameLengthMS;
+			com_ticNumber = 1;
+		} else {
+			// usually numTics should be 1, except if timeDiff > 16.6667 (skipped a frame?)
+			// should be `1 + timediff / com_preciseFrameLengthMS`
+			// <=> 1 + timediff / (1000.0 / USERCMD_HZ) // 1000ms in one second
+			// <=> 1 + timediff * (USERCMD_HZ / 1000.0) // USERCMD_HZ = 60;
+			// <=> 1 + timediff * 0.06;
+			int numTics = 1 + timeDiff * 0.06;
+			com_ticNumber += numTics;
+
+			// the number of msec per tic can be varied with the timescale cvar
+			float timescale = com_timescale.GetFloat();
+			if ( timescale == 1.0f ) {
+				nextTicTime += numTics * com_preciseFrameLengthMS;
+			} else {
+				nextTicTime += numTics * com_preciseFrameLengthMS / timescale;
+			}
+		}
+	}
+}
+
+// DG: updates com_frameTime based on the current tic number (which is also updated if necessary)
+//     and com_preciseFrameLengthMS
+void Com_UpdateFrameTime() {
+	static int lastTicNum = 0;
+
+	Com_UpdateTicNumber();
+
+	int ticNum = com_ticNumber;
+	int ticDiff = ticNum - lastTicNum;
+
+	com_preciseFrameTimeMS += ticDiff * com_preciseFrameLengthMS;
+	com_frameTime = idMath::Rint( com_preciseFrameTimeMS );
+
+	lastTicNum = ticNum;
+}
+
+// DG: waits until com_ticNumber should be increased and then calls Com_UpdateFrameTime() to make that happen
+void Com_WaitForNextTicStart() {
+	D3P_CPUSampleFn();
+	if ( nextTicTime != 0.0 ) {
+		Sys_SleepUntilPrecise( nextTicTime );
+	}
+	Com_UpdateFrameTime();
+}
 
 /*
 ==================
@@ -265,7 +340,8 @@ idCommonLocal::idCommonLocal( void ) {
 	config_compressor = NULL;
 #endif
 
-	async_timer = 0;
+	memset( &asyncThread, 0, sizeof(asyncThread) );
+	runAsyncThread = false;
 }
 
 /*
@@ -1061,6 +1137,7 @@ Writes key bindings and archived cvars to config file if modified
 ===============
 */
 void idCommonLocal::WriteConfiguration( void ) {
+	D3P_ScopedCPUSample(WriteConfiguration);
 	// if we are quiting without fully initializing, make sure
 	// we don't write out anything
 	if ( !com_fullyInitialized ) {
@@ -1407,8 +1484,11 @@ void OSX_GetVideoCard( int& outVendorId, int& outDeviceId );
 bool OSX_GetCPUIdentification( int& cpuId, bool& oldArchitecture );
 #endif
 void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
-	if ( com_machineSpec.GetInteger() == 3 ) {
-		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
+	// DG: add an optional "nores" argument for "don't change the resolution" (r_mode)
+	bool nores = args.Argc() > 1 && idStr::Icmp( args.Argv(1), "nores" ) == 0;
+	cvarSystem->SetCVarInteger( "r_useSoftParticles", 0, CVAR_ARCHIVE ); // DG: disable soft particles for all but ultra
+	if ( com_machineSpec.GetInteger() == 3 ) { // ultra
+		//cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE ); DG: redundant, set again below
 		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_forceDownSize", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
@@ -1425,12 +1505,14 @@ void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
 		cvarSystem->SetCVarInteger( "image_useCompression", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_ignoreHighQuality", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 5, CVAR_ARCHIVE );
+		if ( !nores ) // DG: added optional "nores" argument
+			cvarSystem->SetCVarInteger( "r_mode", 5, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_useNormalCompression", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "r_multiSamples", 0, CVAR_ARCHIVE );
-	} else if ( com_machineSpec.GetInteger() == 2 ) {
+		cvarSystem->SetCVarInteger( "r_useSoftParticles", 1, CVAR_ARCHIVE ); // DG: enable soft particles for ultra preset
+	} else if ( com_machineSpec.GetInteger() == 2 ) { // high
 		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
+		//cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE ); DG: redundant, set again below
 		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_forceDownSize", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_roundDown", 1, CVAR_ARCHIVE );
@@ -1447,9 +1529,10 @@ void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
 		cvarSystem->SetCVarInteger( "image_ignoreHighQuality", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "s_maxSoundsPerShader", 0, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_useNormalCompression", 0, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 4, CVAR_ARCHIVE );
+		if ( !nores ) // DG: added optional "nores" argument
+			cvarSystem->SetCVarInteger( "r_mode", 4, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "r_multiSamples", 0, CVAR_ARCHIVE );
-	} else if ( com_machineSpec.GetInteger() == 1 ) {
+	} else if ( com_machineSpec.GetInteger() == 1 ) { // medium
 		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
@@ -1465,9 +1548,10 @@ void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
 		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_useNormalCompression", 2, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 3, CVAR_ARCHIVE );
+		if ( !nores ) // DG: added optional "nores" argument
+			cvarSystem->SetCVarInteger( "r_mode", 3, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "r_multiSamples", 0, CVAR_ARCHIVE );
-	} else {
+	} else { // low
 		cvarSystem->SetCVarString( "image_filter", "GL_LINEAR_MIPMAP_LINEAR", CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_anisotropy", 1, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_lodbias", 0, CVAR_ARCHIVE );
@@ -1484,7 +1568,8 @@ void Com_ExecMachineSpec_f( const idCmdArgs &args ) {
 		cvarSystem->SetCVarInteger( "image_downSizeBump", 1, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_downSizeSpecularLimit", 64, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_downSizeBumpLimit", 256, CVAR_ARCHIVE );
-		cvarSystem->SetCVarInteger( "r_mode", 3	, CVAR_ARCHIVE );
+		if ( !nores ) // DG: added optional "nores" argument
+			cvarSystem->SetCVarInteger( "r_mode", 3	, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "image_useNormalCompression", 2, CVAR_ARCHIVE );
 		cvarSystem->SetCVarInteger( "r_multiSamples", 0, CVAR_ARCHIVE );
 	}
@@ -2300,6 +2385,8 @@ void idCommonLocal::InitCommands( void ) {
 	cmdSystem->AddCommand( "setMachineSpec", Com_SetMachineSpec_f, CMD_FL_SYSTEM, "detects system capabilities and sets com_machineSpec to appropriate value" );
 	cmdSystem->AddCommand( "execMachineSpec", Com_ExecMachineSpec_f, CMD_FL_SYSTEM, "execs the appropriate config files and sets cvars based on com_machineSpec" );
 
+	cmdSystem->AddCommand( "dhewm3Settings", Com_Dhewm3Settings_f, CMD_FL_SYSTEM, "Toggles (opens/closes) the (advanced) dhewm3 settings menu" );
+
 #if	!defined( ID_DEDICATED ) && (0)
 	// compilers
 	cmdSystem->AddCommand( "dmap", Dmap_f, CMD_FL_TOOL, "compiles a map", idCmdSystem::ArgCompletion_MapName );
@@ -2403,7 +2490,11 @@ idCommonLocal::Frame
 =================
 */
 void idCommonLocal::Frame( void ) {
+	D3P_ScopedCPUSample(Common_Frame);
 	try {
+		// DG: update tic number here for ticNumAtStart (used below to decide whether to sleep before next frame)
+		Com_UpdateTicNumber();
+		int ticNumAtStart = com_ticNumber;
 
 		// pump all the events
 		Sys_GenerateEvents();
@@ -2426,7 +2517,10 @@ void idCommonLocal::Frame( void ) {
 
 		eventLoop->RunEventLoop();
 
-		com_frameTime = com_ticNumber * USERCMD_MSEC;
+		// DG: prepare new ImGui frame - I guess this is a good place, as all new events should be available?
+		D3::ImGuiHooks::NewFrame();
+
+		Com_UpdateFrameTime(); // DG: put updating com_frameTime into a function
 
 		idAsyncNetwork::RunFrame();
 
@@ -2457,6 +2551,31 @@ void idCommonLocal::Frame( void ) {
 
 		// set idLib frame number for frame based memory dumps
 		idLib::frameNumber = com_frameNumber;
+
+#if defined(_WIN32) && defined(ID_ALLOW_TOOLS)
+		// DG: when Radiant is open (unsure about other editors), sleeping here until
+		//   the next frame start somehow makes camera updates (in 2D and 3D windows) crawl?!
+		//   Doesn't *really* make sense (the editor updates run before common->Frame()),
+		//   but what can you do.. maybe MFC just doesn't like sleeping, maybe too many events pile up?
+		if ( com_editors == 0 )
+#endif
+		{
+			if ( com_timescale.GetFloat() == 1.0f && GLimp_GetSwapInterval() != 0
+				&& fabsf(60.0f - GLimp_GetDisplayRefresh()) < 1.0f ) {
+				// if we're using vsync and the display is running at about 60Hz, start next tic
+				// immediately so our internal tic time and vsync don't drift apart
+				double now = Sys_MillisecondsPrecise();
+				if ( nextTicTime > now ) {
+					nextTicTime = now;
+				} // else a new tic is started anyway (which often means that this frame was too long)
+			}
+			else if ( com_ticNumber == ticNumAtStart ) {
+				Com_WaitForNextTicStart();
+			}
+			// else the com_ticNumber has already been updated and it's past time to start the next frame
+		}
+
+		D3P_FRAMEMARK // tell profiler (tracy) that this is the end of a frame
 	}
 
 	catch( idException & ) {
@@ -2472,7 +2591,7 @@ idCommonLocal::GUIFrame
 void idCommonLocal::GUIFrame( bool execCmd, bool network ) {
 	Sys_GenerateEvents();
 	eventLoop->RunEventLoop( execCmd );	// and execute any commands
-	com_frameTime = com_ticNumber * USERCMD_MSEC;
+	Com_UpdateFrameTime(); // DG: put updating com_frameTime into a function
 	if ( network ) {
 		idAsyncNetwork::RunFrame();
 	}
@@ -2482,110 +2601,37 @@ void idCommonLocal::GUIFrame( bool execCmd, bool network ) {
 
 /*
 =================
-idCommonLocal::SingleAsyncTic
+idCommonLocal::Async
 
-The system will asyncronously call this function 60 times a second to
-handle the time-critical functions that we don't want limited to
-the frame rate:
-
-sound mixing
-user input generation (conditioned by com_asyncInput)
-packet server operation
-packet client operation
+Called 60 times per second (by AsyncThread), updates audio.
 
 We are not using thread safe libraries, so any functionality put here must
 be VERY VERY careful about what it calls.
 =================
 */
-
-typedef struct {
-	int				milliseconds;			// should always be incremeting by 60hz
-	int				deltaMsec;				// should always be 16
-	int				timeConsumed;			// msec spent in Com_AsyncThread()
-	int				clientPacketsReceived;
-	int				serverPacketsReceived;
-	int				mostRecentServerPacketSequence;
-} asyncStats_t;
-
-static const int MAX_ASYNC_STATS = 1024;
-asyncStats_t	com_asyncStats[MAX_ASYNC_STATS];		// indexed by com_ticNumber
-int prevAsyncMsec;
-int	lastTicMsec;
-
-void idCommonLocal::SingleAsyncTic( void ) {
+void idCommonLocal::Async( void ) {
 	// main thread code can prevent this from happening while modifying
 	// critical data structures
+
 	Sys_EnterCriticalSection();
 
-	asyncStats_t *stat = &com_asyncStats[com_ticNumber & (MAX_ASYNC_STATS-1)];
-	memset( stat, 0, sizeof( *stat ) );
-	stat->milliseconds = Sys_Milliseconds();
-	stat->deltaMsec = stat->milliseconds - com_asyncStats[(com_ticNumber - 1) & (MAX_ASYNC_STATS-1)].milliseconds;
-
-	if ( usercmdGen && com_asyncInput.GetBool() ) {
-		usercmdGen->UsercmdInterrupt();
-	}
+	int now = Sys_Milliseconds();
 
 	switch ( com_asyncSound.GetInteger() ) {
 		case 1:
 		case 3:
 			// DG: these are now used for the new default behavior of "update every async tic (every 16ms)"
-			soundSystem->AsyncUpdateWrite( stat->milliseconds );
+			soundSystem->AsyncUpdateWrite( now );
 			break;
 		case 2:
 			// DG: use 2 for the old "update only 10x/second" behavior in case anyone likes that..
-			soundSystem->AsyncUpdate( stat->milliseconds );
+			soundSystem->AsyncUpdate( now );
 			break;
 	}
 
-	// we update com_ticNumber after all the background tasks
-	// have completed their work for this tic
-	com_ticNumber++;
-
-	stat->timeConsumed = Sys_Milliseconds() - stat->milliseconds;
+	// Note: com_ticNumber is now updated in the main thread.
 
 	Sys_LeaveCriticalSection();
-}
-
-/*
-=================
-idCommonLocal::Async
-=================
-*/
-void idCommonLocal::Async( void ) {
-	int	msec = Sys_Milliseconds();
-	if ( !lastTicMsec ) {
-		lastTicMsec = msec - USERCMD_MSEC;
-	}
-
-	if ( !com_preciseTic.GetBool() ) {
-		// just run a single tic, even if the exact msec isn't precise
-		SingleAsyncTic();
-		return;
-	}
-
-	int ticMsec = USERCMD_MSEC;
-
-	// the number of msec per tic can be varies with the timescale cvar
-	float timescale = com_timescale.GetFloat();
-	if ( timescale != 1.0f ) {
-		ticMsec /= timescale;
-		if ( ticMsec < 1 ) {
-			ticMsec = 1;
-		}
-	}
-
-	// don't skip too many
-	if ( timescale == 1.0f ) {
-		if ( lastTicMsec + 10 * USERCMD_MSEC < msec ) {
-			lastTicMsec = msec - 10*USERCMD_MSEC;
-		}
-	}
-
-	while ( lastTicMsec + ticMsec <= msec ) {
-		SingleAsyncTic();
-		lastTicMsec += ticMsec;
-	}
 }
 
 /*
@@ -2596,9 +2642,29 @@ Helper for LoadGameDLL() to make it less painful to try different dll names.
 =================
 */
 void idCommonLocal::LoadGameDLLbyName( const char *dll, idStr& s ) {
-	s.CapLength(0);
-	// try next to the binary first (build tree)
-	if (Sys_GetPath(PATH_EXE, s)) {
+	// try fs_dllpath first, if set
+	const char* dllpath = cvarSystem->GetCVarString("fs_gameDllPath");
+	if (dllpath != NULL && dllpath[0] != '\0') {
+		s = dllpath;
+		s.AppendPath(dll);
+		gameDLL = sys->DLL_Load(s);
+	}
+
+	#if defined(__AROS__)
+	if (!gameDLL) {
+		s.CapLength(0);
+		// check in the launch (mod) directory first on AROS
+		if (Sys_GetPath(PATH_LAUNCH, s)) {
+			s.AppendPath(dll);
+			gameDLL = sys->DLL_Load(s);
+			if (gameDLL)
+				return;
+		}
+	}
+	#endif
+
+	// try next to the binary second (build tree)
+	if (!gameDLL && Sys_GetPath(PATH_EXE, s)) {
 		// "s = " seems superfluous, but works around g++ 4.7 bug else StripFilename()
 		// (and possibly even CapLength()) seems to be "optimized" away and the string contains garbage
 		s = s.StripFilename();
@@ -2621,7 +2687,14 @@ void idCommonLocal::LoadGameDLLbyName( const char *dll, idStr& s ) {
 			s.AppendPath(dll);
 			gameDLL = sys->DLL_Load(s);
 		}
-	#else
+
+		// if not found in the bundle's directory, try in the bundle itself
+		if (!gameDLL && Sys_GetPath(PATH_EXE, s)) {
+			s.AppendPath("Contents/MacOS/base");
+			s.AppendPath(dll);
+			gameDLL = sys->DLL_Load(s);
+		}
+	#elif !defined(__AROS__)
 		// then the install folder on *nix
 		if (!gameDLL) {
 			s = BUILD_LIBDIR;
@@ -2658,13 +2731,27 @@ void idCommonLocal::LoadGameDLL( void ) {
 	// there was no gamelib for this mod, use default one from base game
 	if (!gameDLL) {
 		common->Printf( "\n" );
-		common->Warning( "couldn't load mod-specific %s, defaulting to base game's library!\n", dll );
-		sys->DLL_GetFileName(BASE_GAMEDIR, dll, sizeof(dll));
-		LoadGameDLLbyName(dll, s);
+
+		const char *fs_base = cvarSystem->GetCVarString("fs_game_base");
+		if (fs_base && fs_base[0]) {
+			common->Warning( "couldn't load mod-specific %s, defaulting to library of fs_game_base (%s)!\n", dll, fs_base);
+			sys->DLL_GetFileName(fs_base, dll, sizeof(dll));
+			LoadGameDLLbyName(dll, s);
+			if ( !gameDLL ) {
+				common->Warning( "couldn't load fs_game_base lib %s either, defaulting to base game's library!\n", dll);
+			}
+		} else {
+			common->Warning( "couldn't load mod-specific %s, defaulting to base game's library!\n", dll );
+		}
+
+		if ( !gameDLL ) {
+			sys->DLL_GetFileName(BASE_GAMEDIR, dll, sizeof(dll));
+			LoadGameDLLbyName(dll, s);
+		}
 	}
 
 	if ( !gameDLL ) {
-		common->FatalError( "couldn't load game dynamic library" );
+		common->FatalError( "couldn't load game dynamic library '%s'", dll );
 		return;
 	}
 
@@ -2774,21 +2861,24 @@ void idCommonLocal::SetMachineSpec( void ) {
 	}
 }
 
-static unsigned int AsyncTimer(unsigned int interval, void *) {
-	common->Async();
-	Sys_TriggerEvent(TRIGGER_EVENT_ONE);
 
-	// calculate the next interval to get as close to 60fps as possible
-	unsigned int now = SDL_GetTicks();
-	unsigned int tick = com_ticNumber * USERCMD_MSEC;
-	// FIXME: this is pretty broken and basically always returns 1 because now now is much bigger than tic
-	//        (probably com_tickNumber only starts incrementing a second after engine starts?)
-	//        only reason this works is common->Async() checking again before calling SingleAsyncTic()
+int idCommonLocal::AsyncThread(void* arg)
+{
+	idCommonLocal* self = (idCommonLocal*)arg;
 
-	if (now >= tick)
-		return 1;
+	double nextTicTargetMsec = Sys_MillisecondsPrecise();
 
-	return tick - now;
+	while ( self->runAsyncThread ) {
+		D3P_ScopedCPUSample(Async_Frame);
+		self->Async();
+
+		// TODO: Should this be synchronized with the main thread somehow?
+		//       Might make sense to run this when game tics are done, while main thread is rendering?
+		//       For now I'll assume that just doing this 60 times per second works well enough...
+		nextTicTargetMsec += com_preciseFrameLengthMS;
+		Sys_SleepUntilPrecise( nextTicTargetMsec );
+	}
+	return 0;
 }
 
 #ifdef _WIN32
@@ -2842,6 +2932,13 @@ static bool checkForHelp(int argc, char **argv)
 				WriteString("  set path to your Doom3 game data (the directory base/ is in)\n");
 				WriteString("+set fs_game <modname>\n");
 				WriteString("  start the given addon/mod, e.g. +set fs_game d3xp\n");
+				WriteString("+set fs_game_base <base-modname>\n");
+				WriteString("  some mods are based on other mods, usually d3xp.\n");
+				WriteString("  This specifies the base mod e.g. +set fs_game d3le +set fs_game_base d3xp\n");
+				WriteString("+set fs_gameDllPath <additional game lib path>");
+				WriteString("  sets a path to look for game/mod libs (.dll/.so/.dylib) in.");
+				WriteString("  It's searched before all the other default paths (like next to the executable");
+				WriteString("  Especially useful when developing/testing/debugging a mod DLL");
 #ifndef ID_DEDICATED
 				WriteString("+set r_fullscreen <0 or 1>\n");
 				WriteString("  start game in windowed (0) or fullscreen (1) mode\n");
@@ -2911,7 +3008,9 @@ void idCommonLocal::Init( int argc, char **argv ) {
 	// we want to use the SDL event queue for dedicated servers. That
 	// requires video to be initialized, so we just use the dummy
 	// driver for headless boxen
-#if SDL_VERSION_ATLEAST(2, 0, 0)
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
 	SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
 #else
 	char dummy[] = "SDL_VIDEODRIVER=dummy\0";
@@ -2919,8 +3018,26 @@ void idCommonLocal::Init( int argc, char **argv ) {
 #endif
 #endif
 
-	if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)) // init joystick to work around SDL 2.0.9 bug #4391
-		Sys_Error("Error while initializing SDL: %s", SDL_GetError());
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+	if ( ! SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD) )
+	{
+		if ( SDL_Init(SDL_INIT_VIDEO) ) { // retry without joystick/gamepad if it failed
+			Sys_Printf( "WARNING: Couldn't get SDL gamepad support! Gamepads won't work!\n" );
+		} else
+#elif SDL_VERSION_ATLEAST(2, 0, 0)
+	if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0)
+	{
+		if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO) == 0) { // retry without joystick/gamecontroller if it failed
+			Sys_Printf( "WARNING: Couldn't get SDL gamecontroller support! Gamepads won't work!\n" );
+		} else
+#else // SDL1.2
+	if (SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO) != 0) // no gamecontroller support in SDL1
+	{
+#endif
+		{
+			Sys_Error("Error while initializing SDL: %s", SDL_GetError());
+		}
+	}
 
 	Sys_InitThreads();
 
@@ -2933,6 +3050,15 @@ void idCommonLocal::Init( int argc, char **argv ) {
 	 *  * https://github.com/libsdl-org/SDL/issues/4039
 	 *  * https://github.com/libsdl-org/SDL/issues/3656 */
 	SDL_SetHint( SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "1" );
+  #ifdef SDL_HINT_ENABLE_SCREEN_KEYBOARD
+	SDL_SetHint( SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0" );
+  #else
+	// fallback for older SDL2 versions, maybe at least the runtime version is new enough
+	// for this hint if the compile time SDL2 version wasn't (and if not this won't hurt)
+	if (SDL_getenv("SDL_ENABLE_SCREEN_KEYBOARD") == NULL) {
+		SDL_setenv("SDL_ENABLE_SCREEN_KEYBOARD", "0", 0);
+	}
+  #endif
 #endif
 
 	try {
@@ -2965,14 +3091,22 @@ void idCommonLocal::Init( int argc, char **argv ) {
 		idCVar::RegisterStaticVars();
 
 		// print engine version
-#if SDL_VERSION_ATLEAST(2, 0, 0)
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+		int sdlv = SDL_GetVersion();
+		int sdlvmaj = SDL_VERSIONNUM_MAJOR(sdlv);
+		int sdlvmin = SDL_VERSIONNUM_MINOR(sdlv);
+		int sdlvmicro = SDL_VERSIONNUM_MICRO(sdlv);
+		Printf( "%s using SDL v%d.%d.%d\n", version.string, sdlvmaj, sdlvmin, sdlvmicro );
+#else
+  #if SDL_VERSION_ATLEAST(2, 0, 0)
 		SDL_version sdlv;
 		SDL_GetVersion(&sdlv);
-#else
+  #else
 		SDL_version sdlv = *SDL_Linked_Version();
-#endif
+  #endif
 		Printf( "%s using SDL v%u.%u.%u\n",
 				version.string, sdlv.major, sdlv.minor, sdlv.patch );
+#endif
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 		Printf( "SDL video driver: %s\n", SDL_GetCurrentVideoDriver() );
@@ -3041,10 +3175,8 @@ void idCommonLocal::Init( int argc, char **argv ) {
 		Sys_Error( "Error during initialization" );
 	}
 
-	async_timer = SDL_AddTimer(USERCMD_MSEC, AsyncTimer, NULL);
-
-	if (!async_timer)
-		Sys_Error("Error while starting the async timer: %s", SDL_GetError());
+	runAsyncThread = true;
+	Sys_CreateThread( AsyncThread, this, asyncThread, "AsyncThread" );
 }
 
 
@@ -3054,9 +3186,10 @@ idCommonLocal::Shutdown
 =================
 */
 void idCommonLocal::Shutdown( void ) {
-	if (async_timer) {
-		SDL_RemoveTimer(async_timer);
-		async_timer = 0;
+	if ( asyncThread.threadHandle != NULL ) {
+		runAsyncThread = false;
+		Sys_DestroyThread( asyncThread );
+		memset( &asyncThread, 0, sizeof(asyncThread) );
 	}
 
 	idAsyncNetwork::server.Kill();

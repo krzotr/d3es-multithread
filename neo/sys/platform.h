@@ -31,6 +31,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "config.h"
 #include "framework/BuildDefines.h"
+#include "framework/Profiling.h"
 
 #ifdef _WIN32
 #include <malloc.h> // _alloca()
@@ -38,9 +39,11 @@ If you have questions concerning this license or the applicable additional terms
 
 // NOTE: By default Win32 uses a 1MB stack. Doom3 1.3.1 uses 4MB (probably set after compiling with EDITBIN /STACK
 // dhewm3 now uses a 8MB stack, set with a linker flag in CMakeLists.txt (/STACK:8388608 for MSVC, -Wl,--stack,8388608 for mingw)
-// Linux has a 8MB stack by default, and so does macOS, at least for the main thread
-// anyway, a 2MB limit alloca should be safe even when using it multiple times in the same function
-#define ID_MAX_ALLOCA_SIZE 2097152 // 2MB
+// Linux has a 8MB stack by default, and so does macOS, at least for the main thread.
+// Anyway, a 1MB limit for _alloca() should be safe even when using it multiple times
+// in the same function or callstack.
+// If there's a risk of bigger stack allocations, Mem_MallocA() should be used instead.
+#define ID_MAX_ALLOCA_SIZE 1048576 // 1MB
 
 /*
 ===============================================================================
@@ -83,7 +86,8 @@ If you have questions concerning this license or the applicable additional terms
 
 #ifdef __MINGW32__
   #undef _alloca // in mingw _alloca is a #define
-  #define _alloca16( x )			( (assert((x)<ID_MAX_ALLOCA_SIZE)), __builtin_alloca_with_align( (x), 16*8 ) )
+  // NOTE: Do *not* use __builtin_alloca_with_align(), unlike regular alloca it frees at end of block instead of end of function !
+  #define _alloca16( x )			( (void *) ( (assert((x)<ID_MAX_ALLOCA_SIZE)), ((((uintptr_t)__builtin_alloca( (x)+15 )) + 15) & ~15) ) )
   #define _alloca( x )				( (assert((x)<ID_MAX_ALLOCA_SIZE)), __builtin_alloca( (x) ) )
 #else
   #define _alloca16( x )			( (void *) ( (assert((x)<ID_MAX_ALLOCA_SIZE)), ((((uintptr_t)_alloca( (x)+15 )) + 15) & ~15) ) )
@@ -186,7 +190,8 @@ If you have questions concerning this license or the applicable additional terms
 #ifdef __unix__
 
 #ifdef	__GNUC__
-  #define _alloca16( x )			( ({assert((x)<ID_MAX_ALLOCA_SIZE);}), __builtin_alloca_with_align( (x), 16*8 ) )
+  // NOTE: Do *not* use __builtin_alloca_with_align(), unlike regular alloca it frees at end of block instead of end of function !
+  #define _alloca16( x )			(({assert( (x)<ID_MAX_ALLOCA_SIZE );}),((void *)((((uintptr_t)__builtin_alloca( (x)+15 )) + 15) & ~15)))
   #define _alloca( x )				( ({assert((x)<ID_MAX_ALLOCA_SIZE);}), __builtin_alloca( (x) ) )
 #else
   #define _alloca( x )				(({assert( (x)<ID_MAX_ALLOCA_SIZE );}), alloca( (x) ))
